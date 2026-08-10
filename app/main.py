@@ -1,8 +1,18 @@
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app import crud, schemas
 from app.database import Base, engine, get_db
+from app.utils import (
+    APIError,
+    INTERNAL_ERROR,
+    NOT_FOUND,
+    VALIDATION_ERROR,
+    error_response,
+    success_response,
+)
 
 
 Base.metadata.create_all(bind=engine)
@@ -15,24 +25,61 @@ app = FastAPI(
 )
 
 
+@app.exception_handler(APIError)
+async def api_error_handler(_: Request, exc: APIError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=error_response(
+            message=exc.message,
+            code=exc.code,
+            details=exc.details,
+        ),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(_: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content=error_response(
+            message="Validation error",
+            code=VALIDATION_ERROR,
+            details=exc.errors(),
+        ),
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content=error_response(
+            message="Internal server error",
+            code=INTERNAL_ERROR,
+            details=str(exc),
+        ),
+    )
+
+
 @app.get("/")
 def root():
-    return {
-        "message": "Welcome to Research Laboratory Management System",
-        "docs": "/docs"
-    }
+    return success_response(
+        data={"docs": "/docs"},
+        message="Welcome to Research Laboratory Management System",
+    )
 
 
 @app.get("/health")
 def health_check():
-    return {
-        "status": "healthy"
-    }
+    return success_response(
+        data={"status": "healthy"},
+        message="Service is healthy",
+    )
 
 
 @app.post(
     "/projects/",
-    response_model=schemas.ProjectResponse,
+    response_model=None,
     status_code=201
 )
 def create_project(
@@ -40,12 +87,16 @@ def create_project(
     db: Session = Depends(get_db)
 ):
 
-    return crud.create_project(db, project)
+    created = crud.create_project(db, project)
+    return success_response(
+        data=created,
+        message="Project created",
+    )
 
 
 @app.get(
     "/projects/",
-    response_model=list[schemas.ProjectResponse]
+    response_model=None
 )
 def get_projects(
     skip: int = 0,
@@ -53,39 +104,41 @@ def get_projects(
     db: Session = Depends(get_db)
 ):
 
-    return crud.get_projects(
-        db,
-        skip=skip,
-        limit=limit
+    items = crud.get_projects(db, skip=skip, limit=limit)
+    return success_response(
+        data=items,
+        message="OK",
+        total=len(items),
     )
 
 
 @app.get(
     "/projects/{project_id}",
-    response_model=schemas.ProjectResponse
+    response_model=None
 )
 def get_project(
     project_id: int,
     db: Session = Depends(get_db)
 ):
 
-    project = crud.get_project(
-        db,
-        project_id
-    )
+    project = crud.get_project(db, project_id)
 
     if project is None:
-        raise HTTPException(
+        raise APIError(
             status_code=404,
-            detail="Project not found"
+            message="Project not found",
+            code=NOT_FOUND,
         )
 
-    return project
+    return success_response(
+        data=project,
+        message="OK",
+    )
 
 
 @app.put(
     "/projects/{project_id}",
-    response_model=schemas.ProjectResponse
+    response_model=None
 )
 def update_project(
     project_id: int,
@@ -93,19 +146,19 @@ def update_project(
     db: Session = Depends(get_db)
 ):
 
-    project = crud.update_project(
-        db,
-        project_id,
-        project_data
-    )
+    project = crud.update_project(db, project_id, project_data)
 
     if project is None:
-        raise HTTPException(
+        raise APIError(
             status_code=404,
-            detail="Project not found"
+            message="Project not found",
+            code=NOT_FOUND,
         )
 
-    return project
+    return success_response(
+        data=project,
+        message="Project updated",
+    )
 
 
 @app.delete("/projects/{project_id}")
@@ -114,25 +167,24 @@ def delete_project(
     db: Session = Depends(get_db)
 ):
 
-    deleted = crud.delete_project(
-        db,
-        project_id
-    )
+    deleted = crud.delete_project(db, project_id)
 
     if not deleted:
-        raise HTTPException(
+        raise APIError(
             status_code=404,
-            detail="Project not found"
+            message="Project not found",
+            code=NOT_FOUND,
         )
 
-    return {
-        "message": "Project deleted successfully"
-    }
+    return success_response(
+        data={"id": project_id},
+        message="Project deleted successfully",
+    )
 
 
 @app.post(
     "/tasks/",
-    response_model=schemas.TaskResponse,
+    response_model=None,
     status_code=201
 )
 def create_task(
@@ -143,17 +195,21 @@ def create_task(
     created_task = crud.create_task(db, task)
 
     if created_task is None:
-        raise HTTPException(
+        raise APIError(
             status_code=404,
-            detail="Project not found"
+            message="Project not found",
+            code=NOT_FOUND,
         )
 
-    return created_task
+    return success_response(
+        data=created_task,
+        message="Task created",
+    )
 
 
 @app.get(
     "/tasks/",
-    response_model=list[schemas.TaskResponse]
+    response_model=None
 )
 def get_tasks(
     skip: int = 0,
@@ -161,12 +217,17 @@ def get_tasks(
     db: Session = Depends(get_db)
 ):
 
-    return crud.get_tasks(db, skip=skip, limit=limit)
+    items = crud.get_tasks(db, skip=skip, limit=limit)
+    return success_response(
+        data=items,
+        message="OK",
+        total=len(items),
+    )
 
 
 @app.get(
     "/tasks/{task_id}",
-    response_model=schemas.TaskResponse
+    response_model=None
 )
 def get_task(
     task_id: int,
@@ -176,17 +237,21 @@ def get_task(
     task = crud.get_task(db, task_id)
 
     if task is None:
-        raise HTTPException(
+        raise APIError(
             status_code=404,
-            detail="Task not found"
+            message="Task not found",
+            code=NOT_FOUND,
         )
 
-    return task
+    return success_response(
+        data=task,
+        message="OK",
+    )
 
 
 @app.put(
     "/tasks/{task_id}",
-    response_model=schemas.TaskResponse
+    response_model=None
 )
 def update_task(
     task_id: int,
@@ -197,12 +262,16 @@ def update_task(
     task = crud.update_task(db, task_id, task_data)
 
     if task is None:
-        raise HTTPException(
+        raise APIError(
             status_code=404,
-            detail="Task not found"
+            message="Task not found",
+            code=NOT_FOUND,
         )
 
-    return task
+    return success_response(
+        data=task,
+        message="Task updated",
+    )
 
 
 @app.delete("/tasks/{task_id}")
@@ -214,19 +283,21 @@ def delete_task(
     deleted = crud.delete_task(db, task_id)
 
     if not deleted:
-        raise HTTPException(
+        raise APIError(
             status_code=404,
-            detail="Task not found"
+            message="Task not found",
+            code=NOT_FOUND,
         )
 
-    return {
-        "message": "Task deleted successfully"
-    }
+    return success_response(
+        data={"id": task_id},
+        message="Task deleted successfully",
+    )
 
 
 @app.post(
     "/inventory/",
-    response_model=schemas.InventoryResponse,
+    response_model=None,
     status_code=201
 )
 def create_inventory_item(
@@ -234,12 +305,16 @@ def create_inventory_item(
     db: Session = Depends(get_db)
 ):
 
-    return crud.create_inventory_item(db, inventory_item)
+    created = crud.create_inventory_item(db, inventory_item)
+    return success_response(
+        data=created,
+        message="Inventory item created",
+    )
 
 
 @app.get(
     "/inventory/",
-    response_model=list[schemas.InventoryResponse]
+    response_model=None
 )
 def get_inventory(
     skip: int = 0,
@@ -247,12 +322,17 @@ def get_inventory(
     db: Session = Depends(get_db)
 ):
 
-    return crud.get_inventory(db, skip=skip, limit=limit)
+    items = crud.get_inventory(db, skip=skip, limit=limit)
+    return success_response(
+        data=items,
+        message="OK",
+        total=len(items),
+    )
 
 
 @app.get(
     "/inventory/{inventory_id}",
-    response_model=schemas.InventoryResponse
+    response_model=None
 )
 def get_inventory_item(
     inventory_id: int,
@@ -262,17 +342,21 @@ def get_inventory_item(
     inventory_item = crud.get_inventory_item(db, inventory_id)
 
     if inventory_item is None:
-        raise HTTPException(
+        raise APIError(
             status_code=404,
-            detail="Inventory item not found"
+            message="Inventory item not found",
+            code=NOT_FOUND,
         )
 
-    return inventory_item
+    return success_response(
+        data=inventory_item,
+        message="OK",
+    )
 
 
 @app.put(
     "/inventory/{inventory_id}",
-    response_model=schemas.InventoryResponse
+    response_model=None
 )
 def update_inventory_item(
     inventory_id: int,
@@ -287,12 +371,16 @@ def update_inventory_item(
     )
 
     if inventory_item is None:
-        raise HTTPException(
+        raise APIError(
             status_code=404,
-            detail="Inventory item not found"
+            message="Inventory item not found",
+            code=NOT_FOUND,
         )
 
-    return inventory_item
+    return success_response(
+        data=inventory_item,
+        message="Inventory item updated",
+    )
 
 
 @app.delete("/inventory/{inventory_id}")
@@ -304,19 +392,21 @@ def delete_inventory_item(
     deleted = crud.delete_inventory_item(db, inventory_id)
 
     if not deleted:
-        raise HTTPException(
+        raise APIError(
             status_code=404,
-            detail="Inventory item not found"
+            message="Inventory item not found",
+            code=NOT_FOUND,
         )
 
-    return {
-        "message": "Inventory item deleted successfully"
-    }
+    return success_response(
+        data={"id": inventory_id},
+        message="Inventory item deleted successfully",
+    )
 
 
 @app.post(
     "/samples/",
-    response_model=schemas.SampleResponse,
+    response_model=None,
     status_code=201
 )
 def create_sample(
@@ -327,17 +417,21 @@ def create_sample(
     created_sample = crud.create_sample(db, sample)
 
     if created_sample is None:
-        raise HTTPException(
+        raise APIError(
             status_code=404,
-            detail="Project not found"
+            message="Project not found",
+            code=NOT_FOUND,
         )
 
-    return created_sample
+    return success_response(
+        data=created_sample,
+        message="Sample created",
+    )
 
 
 @app.get(
     "/samples/",
-    response_model=list[schemas.SampleResponse]
+    response_model=None
 )
 def get_samples(
     skip: int = 0,
@@ -345,12 +439,17 @@ def get_samples(
     db: Session = Depends(get_db)
 ):
 
-    return crud.get_samples(db, skip=skip, limit=limit)
+    items = crud.get_samples(db, skip=skip, limit=limit)
+    return success_response(
+        data=items,
+        message="OK",
+        total=len(items),
+    )
 
 
 @app.get(
     "/samples/{sample_id}",
-    response_model=schemas.SampleResponse
+    response_model=None
 )
 def get_sample(
     sample_id: int,
@@ -360,17 +459,21 @@ def get_sample(
     sample = crud.get_sample(db, sample_id)
 
     if sample is None:
-        raise HTTPException(
+        raise APIError(
             status_code=404,
-            detail="Sample not found"
+            message="Sample not found",
+            code=NOT_FOUND,
         )
 
-    return sample
+    return success_response(
+        data=sample,
+        message="OK",
+    )
 
 
 @app.put(
     "/samples/{sample_id}",
-    response_model=schemas.SampleResponse
+    response_model=None
 )
 def update_sample(
     sample_id: int,
@@ -381,12 +484,16 @@ def update_sample(
     sample = crud.update_sample(db, sample_id, sample_data)
 
     if sample is None:
-        raise HTTPException(
+        raise APIError(
             status_code=404,
-            detail="Sample not found"
+            message="Sample not found",
+            code=NOT_FOUND,
         )
 
-    return sample
+    return success_response(
+        data=sample,
+        message="Sample updated",
+    )
 
 
 @app.delete("/samples/{sample_id}")
@@ -398,11 +505,13 @@ def delete_sample(
     deleted = crud.delete_sample(db, sample_id)
 
     if not deleted:
-        raise HTTPException(
+        raise APIError(
             status_code=404,
-            detail="Sample not found"
+            message="Sample not found",
+            code=NOT_FOUND,
         )
 
-    return {
-        "message": "Sample deleted successfully"
-    }
+    return success_response(
+        data={"id": sample_id},
+        message="Sample deleted successfully",
+    )
