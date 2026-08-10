@@ -20,7 +20,6 @@ lab-manager/
 │   ├── utils.py         # Response envelope + APIError
 │   └── auth.py, dependencies.py   # (reserved for future auth work)
 ├── tests/               # pytest suite
-├── test_api_smoke.py    # End-to-end smoke test against a live server
 ├── requirements.txt
 └── readme.md
 ```
@@ -61,7 +60,7 @@ Useful URLs:
 | `http://127.0.0.1:8000/docs` | Interactive Swagger UI |
 | `http://127.0.0.1:8000/redoc` | ReDoc API reference |
 
-To run on a different port (used by the smoke test):
+To run on a different port:
 
 ```bash
 uvicorn app.main:app --port 8001
@@ -119,24 +118,10 @@ For validation errors (HTTP 422), `error.details` contains the Pydantic error li
 pytest
 ```
 
-### Smoke test against a live server
-
-In one terminal, start the server on port 8001:
-
-```bash
-uvicorn app.main:app --port 8001
-```
-
-In another terminal, run:
-
-```bash
-python test_api_smoke.py
-```
-
-The script exercises every endpoint end-to-end and asserts that every response matches the envelope described above.
+The suite under `tests/` covers the CRUD helpers and the FastAPI routes, including the response envelope.
 
 ## Troubleshooting
 
 - **`ModuleNotFoundError: No module named 'app'`** — run commands from the `lab-manager/` directory (the one containing `app/`), not from inside `app/`.
-- **Port already in use** — pass `--port <other>` to uvicorn and update `base` in `test_api_smoke.py` to match.
+- **Port already in use** — pass `--port <other>` to uvicorn.
 - **Stale schema** — delete `lab_manager.db` to recreate tables from the current models on the next startup.

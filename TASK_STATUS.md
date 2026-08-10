@@ -154,10 +154,10 @@ This file documents what has been completed in Step 2 and what remains to be don
   - `feature/sample-crud`
 
 ### B. Review and polish
-- Review the API responses and make sure they all follow consistent JSON shape.
-- Add or update README instructions for running the app and testing endpoints.
-- Clean up any temporary files like `test_api_smoke.py` if not needed.
-- Ensure `.gitignore` excludes `venv`, `__pycache__`, and local DB files.
+- ~~Review the API responses and make sure they all follow consistent JSON shape.~~ ✅ Done — wrapped in `{success, message, data, total}` envelope with `{success, message, error}` for errors; see `app/utils.py` and `app/main.py`.
+- ~~Add or update README instructions for running the app and testing endpoints.~~ ✅ Done — see `readme.md`.
+- ~~Clean up any temporary files like `test_api_smoke.py` if not needed.~~ ✅ Done — removed.
+- ~~Ensure `.gitignore` excludes `venv`, `__pycache__`, and local DB files.~~ ✅ Already covered (`venv/`, `__pycache__/`, `*.db`, `.pytest_cache/`).
 
 ### C. Optional next work after Step 2
 - Add user authentication only after Step 2 is complete.
