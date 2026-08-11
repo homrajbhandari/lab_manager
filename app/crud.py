@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models, schemas
+from app.security import get_password_hash
 
 
 def get_user(
@@ -65,7 +66,9 @@ def create_user(
     db_user = models.User(
         username=user.username,
         email=user.email,
-        full_name=user.full_name
+        full_name=user.full_name,
+        hashed_password=get_password_hash(user.password),
+        role=user.role
     )
 
     db.add(db_user)
@@ -96,8 +99,13 @@ def update_user(
         exclude_unset=True
     )
 
+    password = update_data.pop("password", None)
+
     for key, value in update_data.items():
         setattr(db_user, key, value)
+
+    if password is not None:
+        db_user.hashed_password = get_password_hash(password)
 
     try:
         db.commit()
@@ -150,6 +158,33 @@ def get_projects(
         .limit(limit)
         .all()
     )
+
+
+def get_projects_filtered(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    search: Optional[str] = None
+):
+
+    query = db.query(models.Project)
+
+    if status:
+        query = query.filter(models.Project.status == status)
+    if priority:
+        query = query.filter(models.Project.priority == priority)
+    if search:
+        query = query.filter(
+            models.Project.title.contains(search) |
+            models.Project.description.contains(search)
+        )
+
+    total = query.count()
+    items = query.offset(skip).limit(limit).all()
+
+    return items, total
 
 
 def create_project(

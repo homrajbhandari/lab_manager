@@ -1,15 +1,19 @@
-from fastapi import Depends, FastAPI, Request
+from typing import Optional
+
+from fastapi import Depends, FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
-from app import crud, models, schemas
+from app import auth, crud, models, schemas
 from app.database import Base, engine, get_db
 from app.utils import (
     APIError,
     CONFLICT,
     INTERNAL_ERROR,
     NOT_FOUND,
+    UNAUTHORIZED,
     VALIDATION_ERROR,
     error_response,
     success_response,
@@ -98,8 +102,65 @@ def create_user(
         )
 
     return success_response(
-        data=created,
+        data=schemas.UserResponse.model_validate(created),
         message="User created",
+    )
+
+
+@app.post(
+    "/token",
+    response_model=None
+)
+def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+
+    user = auth.authenticate_user(
+        db, form_data.username, form_data.password
+    )
+
+    if user is None:
+        raise APIError(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            message="Invalid username or password",
+            code=UNAUTHORIZED,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not user.is_active:
+        raise APIError(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            message="Inactive user",
+            code=UNAUTHORIZED,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    access_token = auth.create_access_token(
+        subject=str(user.id),
+        extra_claims={"role": user.role},
+    )
+
+    return success_response(
+        data={
+            "access_token": access_token,
+            "token_type": "bearer"
+        },
+        message="Login successful",
+    )
+
+
+@app.get(
+    "/users/me",
+    response_model=None
+)
+def read_users_me(
+    current_user: models.User = Depends(auth.get_current_user)
+):
+
+    return success_response(
+        data=schemas.UserResponse.model_validate(current_user),
+        message="OK",
     )
 
 
@@ -116,7 +177,7 @@ def get_users(
     items = crud.get_users(db, skip=skip, limit=limit)
     total = db.query(models.User).count()
     return success_response(
-        data=items,
+        data=[schemas.UserResponse.model_validate(u) for u in items],
         message="OK",
         total=total,
     )
@@ -141,7 +202,7 @@ def get_user(
         )
 
     return success_response(
-        data=user,
+        data=schemas.UserResponse.model_validate(user),
         message="OK",
     )
 
@@ -166,7 +227,7 @@ def update_user(
         )
 
     return success_response(
-        data=user,
+        data=schemas.UserResponse.model_validate(user),
         message="User updated",
     )
 
@@ -216,11 +277,15 @@ def create_project(
 def get_projects(
     skip: int = 0,
     limit: int = 100,
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    search: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
 
-    items = crud.get_projects(db, skip=skip, limit=limit)
-    total = db.query(models.Project).count()
+    items, total = crud.get_projects_filtered(
+        db, skip, limit, status, priority, search
+    )
     return success_response(
         data=items,
         message="OK",

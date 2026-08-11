@@ -1,7 +1,12 @@
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
+
+
+# Roles used by the auth layer. Kept as a Literal so pydantic rejects
+# anything else before it reaches the DB.
+UserRole = Literal["admin", "researcher", "technician"]
 
 
 class UserBase(BaseModel):
@@ -11,20 +16,36 @@ class UserBase(BaseModel):
 
 
 class UserCreate(UserBase):
-    pass
+    password: str = Field(..., min_length=8, max_length=200)
+    role: UserRole = "researcher"
 
 
 class UserUpdate(BaseModel):
     username: Optional[str] = Field(default=None, min_length=1, max_length=100)
     email: Optional[EmailStr] = None
     full_name: Optional[str] = Field(default=None, max_length=200)
+    password: Optional[str] = Field(default=None, min_length=8, max_length=200)
+    role: Optional[UserRole] = None
+    is_active: Optional[bool] = None
 
 
 class UserResponse(UserBase):
     id: int
+    is_active: bool
+    role: UserRole
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=100)
+    password: str = Field(..., min_length=1, max_length=200)
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
 
 
 class ProjectBase(BaseModel):
