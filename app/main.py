@@ -3,7 +3,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from app import crud, schemas
+from app import crud, models, schemas
 from app.database import Base, engine, get_db
 from app.utils import (
     APIError,
@@ -114,10 +114,11 @@ def get_users(
 ):
 
     items = crud.get_users(db, skip=skip, limit=limit)
+    total = db.query(models.User).count()
     return success_response(
         data=items,
         message="OK",
-        total=len(items),
+        total=total,
     )
 
 
@@ -219,10 +220,11 @@ def get_projects(
 ):
 
     items = crud.get_projects(db, skip=skip, limit=limit)
+    total = db.query(models.Project).count()
     return success_response(
         data=items,
         message="OK",
-        total=len(items),
+        total=total,
     )
 
 
@@ -332,10 +334,11 @@ def get_tasks(
 ):
 
     items = crud.get_tasks(db, skip=skip, limit=limit)
+    total = db.query(models.Task).count()
     return success_response(
         data=items,
         message="OK",
-        total=len(items),
+        total=total,
     )
 
 
@@ -437,10 +440,11 @@ def get_inventory(
 ):
 
     items = crud.get_inventory(db, skip=skip, limit=limit)
+    total = db.query(models.Inventory).count()
     return success_response(
         data=items,
         message="OK",
-        total=len(items),
+        total=total,
     )
 
 
@@ -554,10 +558,11 @@ def get_samples(
 ):
 
     items = crud.get_samples(db, skip=skip, limit=limit)
+    total = db.query(models.Sample).count()
     return success_response(
         data=items,
         message="OK",
-        total=len(items),
+        total=total,
     )
 
 
