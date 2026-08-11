@@ -7,6 +7,7 @@ from app import crud, schemas
 from app.database import Base, engine, get_db
 from app.utils import (
     APIError,
+    CONFLICT,
     INTERNAL_ERROR,
     NOT_FOUND,
     VALIDATION_ERROR,
@@ -74,6 +75,119 @@ def health_check():
     return success_response(
         data={"status": "healthy"},
         message="Service is healthy",
+    )
+
+
+@app.post(
+    "/users/",
+    response_model=None,
+    status_code=201
+)
+def create_user(
+    user: schemas.UserCreate,
+    db: Session = Depends(get_db)
+):
+
+    created = crud.create_user(db, user)
+
+    if created is None:
+        raise APIError(
+            status_code=409,
+            message="Username or email already exists",
+            code=CONFLICT,
+        )
+
+    return success_response(
+        data=created,
+        message="User created",
+    )
+
+
+@app.get(
+    "/users/",
+    response_model=None
+)
+def get_users(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+
+    items = crud.get_users(db, skip=skip, limit=limit)
+    return success_response(
+        data=items,
+        message="OK",
+        total=len(items),
+    )
+
+
+@app.get(
+    "/users/{user_id}",
+    response_model=None
+)
+def get_user(
+    user_id: int,
+    db: Session = Depends(get_db)
+):
+
+    user = crud.get_user(db, user_id)
+
+    if user is None:
+        raise APIError(
+            status_code=404,
+            message="User not found",
+            code=NOT_FOUND,
+        )
+
+    return success_response(
+        data=user,
+        message="OK",
+    )
+
+
+@app.put(
+    "/users/{user_id}",
+    response_model=None
+)
+def update_user(
+    user_id: int,
+    user_data: schemas.UserUpdate,
+    db: Session = Depends(get_db)
+):
+
+    user = crud.update_user(db, user_id, user_data)
+
+    if user is None:
+        raise APIError(
+            status_code=404,
+            message="User not found",
+            code=NOT_FOUND,
+        )
+
+    return success_response(
+        data=user,
+        message="User updated",
+    )
+
+
+@app.delete("/users/{user_id}")
+def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db)
+):
+
+    deleted = crud.delete_user(db, user_id)
+
+    if not deleted:
+        raise APIError(
+            status_code=404,
+            message="User not found",
+            code=NOT_FOUND,
+        )
+
+    return success_response(
+        data={"id": user_id},
+        message="User deleted successfully",
     )
 
 

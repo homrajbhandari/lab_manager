@@ -1,7 +1,30 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, EmailStr
+
+
+class UserBase(BaseModel):
+    username: str = Field(..., min_length=1, max_length=100)
+    email: EmailStr
+    full_name: Optional[str] = Field(default=None, max_length=200)
+
+
+class UserCreate(UserBase):
+    pass
+
+
+class UserUpdate(BaseModel):
+    username: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    email: Optional[EmailStr] = None
+    full_name: Optional[str] = Field(default=None, max_length=200)
+
+
+class UserResponse(UserBase):
+    id: int
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ProjectBase(BaseModel):
