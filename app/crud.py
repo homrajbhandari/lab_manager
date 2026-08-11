@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy.exc import IntegrityError
@@ -189,7 +189,7 @@ def update_project(
     for key, value in update_data.items():
         setattr(db_project, key, value)
 
-    db_project.updated_at = datetime.utcnow()
+    db_project.updated_at = datetime.now(timezone.utc)
 
     db.commit()
     db.refresh(db_project)
@@ -286,7 +286,7 @@ def update_task(
     for key, value in update_data.items():
         setattr(db_task, key, value)
 
-    db_task.updated_at = datetime.utcnow()
+    db_task.updated_at = datetime.now(timezone.utc)
 
     db.commit()
     db.refresh(db_task)
@@ -374,7 +374,7 @@ def update_inventory_item(
     for key, value in update_data.items():
         setattr(db_inventory_item, key, value)
 
-    db_inventory_item.updated_at = datetime.utcnow()
+    db_inventory_item.updated_at = datetime.now(timezone.utc)
 
     db.commit()
     db.refresh(db_inventory_item)
@@ -472,7 +472,7 @@ def update_sample(
     for key, value in update_data.items():
         setattr(db_sample, key, value)
 
-    db_sample.updated_at = datetime.utcnow()
+    db_sample.updated_at = datetime.now(timezone.utc)
 
     db.commit()
     db.refresh(db_sample)

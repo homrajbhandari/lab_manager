@@ -1,9 +1,13 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.database import Base
+
+
+def _utcnow():
+    return datetime.now(timezone.utc)
 
 
 class User(Base):
@@ -29,7 +33,7 @@ class User(Base):
 
     created_at = Column(
         DateTime,
-        default=datetime.utcnow
+        default=_utcnow
     )
 
     projects = relationship(
@@ -63,13 +67,13 @@ class Project(Base):
 
     created_at = Column(
         DateTime,
-        default=datetime.utcnow
+        default=_utcnow
     )
 
     updated_at = Column(
         DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow
+        default=_utcnow,
+        onupdate=_utcnow
     )
 
     owner_id = Column(
@@ -108,13 +112,13 @@ class Task(Base):
 
     created_at = Column(
         DateTime,
-        default=datetime.utcnow
+        default=_utcnow
     )
 
     updated_at = Column(
         DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow
+        default=_utcnow,
+        onupdate=_utcnow
     )
 
     project_id = Column(
@@ -141,13 +145,13 @@ class Inventory(Base):
 
     created_at = Column(
         DateTime,
-        default=datetime.utcnow
+        default=_utcnow
     )
 
     updated_at = Column(
         DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow
+        default=_utcnow,
+        onupdate=_utcnow
     )
 
 
@@ -164,13 +168,13 @@ class Sample(Base):
 
     created_at = Column(
         DateTime,
-        default=datetime.utcnow
+        default=_utcnow
     )
 
     updated_at = Column(
         DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow
+        default=_utcnow,
+        onupdate=_utcnow
     )
 
     project_id = Column(
