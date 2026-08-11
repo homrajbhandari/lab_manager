@@ -35,7 +35,7 @@ class ProjectBase(BaseModel):
 
 
 class ProjectCreate(ProjectBase):
-    pass
+    owner_id: Optional[int] = None
 
 
 class ProjectUpdate(BaseModel):

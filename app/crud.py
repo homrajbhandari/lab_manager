@@ -161,7 +161,8 @@ def create_project(
         title=project.title,
         description=project.description,
         status=project.status,
-        priority=project.priority
+        priority=project.priority,
+        owner_id=project.owner_id
     )
 
     db.add(db_project)
