@@ -68,14 +68,25 @@ def success_response(
     data: Any = None,
     message: str = "OK",
     total: Optional[int] = None,
+    pagination: Optional[dict] = None,
 ) -> dict:
-    """Build a uniform success envelope."""
-    return {
+    """Build a uniform success envelope.
+
+    ``total`` is kept as a top-level key for backwards compatibility with
+    pre-pagination clients. ``pagination`` (if provided) is an additional
+    ``{"total", "page", "pages", "per_page"}`` block placed alongside it.
+    """
+    body: dict = {
         "success": True,
         "message": message,
         "data": data,
         "total": total,
     }
+
+    if pagination is not None:
+        body["pagination"] = pagination
+
+    return body
 
 
 def error_response(

@@ -48,6 +48,11 @@ class User(Base):
         cascade="all, delete-orphan"
     )
 
+    tasks_assigned = relationship(
+        "Task",
+        back_populates="assignee"
+    )
+
 
 class Project(Base):
     __tablename__ = "projects"
@@ -134,6 +139,17 @@ class Task(Base):
     )
 
     project = relationship("Project", back_populates="tasks")
+
+    assignee_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=True
+    )
+
+    assignee = relationship(
+        "User",
+        back_populates="tasks_assigned"
+    )
 
 
 class Inventory(Base):

@@ -1,6 +1,7 @@
+from datetime import datetime
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Request, status
+from fastapi import Depends, FastAPI, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
@@ -8,6 +9,11 @@ from sqlalchemy.orm import Session
 
 from app import auth, crud, models, schemas
 from app.database import Base, engine, get_db
+from app.dependencies import PaginationParams
+from app.migrations import (
+    run_task_assignee_migration,
+    run_user_auth_columns_migration,
+)
 from app.utils import (
     APIError,
     CONFLICT,
@@ -21,6 +27,8 @@ from app.utils import (
 
 
 Base.metadata.create_all(bind=engine)
+run_task_assignee_migration(engine)
+run_user_auth_columns_migration(engine)
 
 
 app = FastAPI(
@@ -169,17 +177,41 @@ def read_users_me(
     response_model=None
 )
 def get_users(
-    skip: int = 0,
-    limit: int = 100,
+    pagination: PaginationParams = Depends(),
+    roles: Optional[list[str]] = Query(None),
+    is_active: Optional[bool] = None,
+    search: Optional[str] = None,
+    created_from: Optional[datetime] = None,
+    created_to: Optional[datetime] = None,
     db: Session = Depends(get_db)
 ):
 
-    items = crud.get_users(db, skip=skip, limit=limit)
-    total = db.query(models.User).count()
+    query = db.query(models.User)
+
+    if roles:
+        query = query.filter(models.User.role.in_(roles))
+    if is_active is not None:
+        query = query.filter(models.User.is_active == is_active)
+    if search:
+        query = query.filter(
+            models.User.username.contains(search) |
+            models.User.email.contains(search) |
+            models.User.full_name.contains(search)
+        )
+    if created_from:
+        query = query.filter(models.User.created_at >= created_from)
+    if created_to:
+        query = query.filter(models.User.created_at <= created_to)
+
+    items, total, page, pages, per_page = pagination.paginate(
+        query, sortable_columns={"id", "username", "email", "role", "created_at"}
+    )
+
     return success_response(
         data=[schemas.UserResponse.model_validate(u) for u in items],
         message="OK",
         total=total,
+        pagination=pagination.pagination_block(total, page, pages, per_page),
     )
 
 
@@ -275,21 +307,48 @@ def create_project(
     response_model=None
 )
 def get_projects(
-    skip: int = 0,
-    limit: int = 100,
-    status: Optional[str] = None,
-    priority: Optional[str] = None,
+    pagination: PaginationParams = Depends(),
+    statuses: Optional[list[str]] = Query(None),
+    priorities: Optional[list[str]] = Query(None),
     search: Optional[str] = None,
+    created_from: Optional[datetime] = None,
+    created_to: Optional[datetime] = None,
+    updated_from: Optional[datetime] = None,
+    updated_to: Optional[datetime] = None,
     db: Session = Depends(get_db)
 ):
 
-    items, total = crud.get_projects_filtered(
-        db, skip, limit, status, priority, search
+    query = db.query(models.Project)
+
+    if statuses:
+        query = query.filter(models.Project.status.in_(statuses))
+    if priorities:
+        query = query.filter(models.Project.priority.in_(priorities))
+    if search:
+        query = query.filter(
+            models.Project.title.contains(search) |
+            models.Project.description.contains(search)
+        )
+    if created_from:
+        query = query.filter(models.Project.created_at >= created_from)
+    if created_to:
+        query = query.filter(models.Project.created_at <= created_to)
+    if updated_from:
+        query = query.filter(models.Project.updated_at >= updated_from)
+    if updated_to:
+        query = query.filter(models.Project.updated_at <= updated_to)
+
+    items, total, page, pages, per_page = pagination.paginate(
+        query,
+        sortable_columns={"id", "title", "created_at", "updated_at",
+                          "priority", "status"},
     )
+
     return success_response(
         data=items,
         message="OK",
         total=total,
+        pagination=pagination.pagination_block(total, page, pages, per_page),
     )
 
 
@@ -393,17 +452,54 @@ def create_task(
     response_model=None
 )
 def get_tasks(
-    skip: int = 0,
-    limit: int = 100,
+    pagination: PaginationParams = Depends(),
+    statuses: Optional[list[str]] = Query(None),
+    priorities: Optional[list[str]] = Query(None),
+    project_ids: Optional[list[int]] = Query(None),
+    assignee_ids: Optional[list[int]] = Query(None),
+    search: Optional[str] = None,
+    created_from: Optional[datetime] = None,
+    created_to: Optional[datetime] = None,
+    updated_from: Optional[datetime] = None,
+    updated_to: Optional[datetime] = None,
     db: Session = Depends(get_db)
 ):
 
-    items = crud.get_tasks(db, skip=skip, limit=limit)
-    total = db.query(models.Task).count()
+    query = db.query(models.Task)
+
+    if statuses:
+        query = query.filter(models.Task.status.in_(statuses))
+    if priorities:
+        query = query.filter(models.Task.priority.in_(priorities))
+    if project_ids:
+        query = query.filter(models.Task.project_id.in_(project_ids))
+    if assignee_ids:
+        query = query.filter(models.Task.assignee_id.in_(assignee_ids))
+    if search:
+        query = query.filter(
+            models.Task.title.contains(search) |
+            models.Task.description.contains(search)
+        )
+    if created_from:
+        query = query.filter(models.Task.created_at >= created_from)
+    if created_to:
+        query = query.filter(models.Task.created_at <= created_to)
+    if updated_from:
+        query = query.filter(models.Task.updated_at >= updated_from)
+    if updated_to:
+        query = query.filter(models.Task.updated_at <= updated_to)
+
+    items, total, page, pages, per_page = pagination.paginate(
+        query,
+        sortable_columns={"id", "title", "created_at", "updated_at",
+                          "priority", "status", "project_id", "assignee_id"},
+    )
+
     return success_response(
         data=items,
         message="OK",
         total=total,
+        pagination=pagination.pagination_block(total, page, pages, per_page),
     )
 
 
@@ -499,17 +595,52 @@ def create_inventory_item(
     response_model=None
 )
 def get_inventory(
-    skip: int = 0,
-    limit: int = 100,
+    pagination: PaginationParams = Depends(),
+    categories: Optional[list[str]] = Query(None),
+    locations: Optional[list[str]] = Query(None),
+    suppliers: Optional[list[str]] = Query(None),
+    search: Optional[str] = None,
+    created_from: Optional[datetime] = None,
+    created_to: Optional[datetime] = None,
+    updated_from: Optional[datetime] = None,
+    updated_to: Optional[datetime] = None,
     db: Session = Depends(get_db)
 ):
 
-    items = crud.get_inventory(db, skip=skip, limit=limit)
-    total = db.query(models.Inventory).count()
+    query = db.query(models.Inventory)
+
+    if categories:
+        query = query.filter(models.Inventory.category.in_(categories))
+    if locations:
+        query = query.filter(models.Inventory.location.in_(locations))
+    if suppliers:
+        query = query.filter(models.Inventory.supplier.in_(suppliers))
+    if search:
+        query = query.filter(
+            models.Inventory.name.contains(search) |
+            models.Inventory.description.contains(search) |
+            models.Inventory.supplier.contains(search)
+        )
+    if created_from:
+        query = query.filter(models.Inventory.created_at >= created_from)
+    if created_to:
+        query = query.filter(models.Inventory.created_at <= created_to)
+    if updated_from:
+        query = query.filter(models.Inventory.updated_at >= updated_from)
+    if updated_to:
+        query = query.filter(models.Inventory.updated_at <= updated_to)
+
+    items, total, page, pages, per_page = pagination.paginate(
+        query,
+        sortable_columns={"id", "name", "quantity", "created_at",
+                          "updated_at", "category", "location"},
+    )
+
     return success_response(
         data=items,
         message="OK",
         total=total,
+        pagination=pagination.pagination_block(total, page, pages, per_page),
     )
 
 
@@ -617,17 +748,51 @@ def create_sample(
     response_model=None
 )
 def get_samples(
-    skip: int = 0,
-    limit: int = 100,
+    pagination: PaginationParams = Depends(),
+    statuses: Optional[list[str]] = Query(None),
+    project_ids: Optional[list[int]] = Query(None),
+    sample_types: Optional[list[str]] = Query(None),
+    search: Optional[str] = None,
+    created_from: Optional[datetime] = None,
+    created_to: Optional[datetime] = None,
+    updated_from: Optional[datetime] = None,
+    updated_to: Optional[datetime] = None,
     db: Session = Depends(get_db)
 ):
 
-    items = crud.get_samples(db, skip=skip, limit=limit)
-    total = db.query(models.Sample).count()
+    query = db.query(models.Sample)
+
+    if statuses:
+        query = query.filter(models.Sample.status.in_(statuses))
+    if project_ids:
+        query = query.filter(models.Sample.project_id.in_(project_ids))
+    if sample_types:
+        query = query.filter(models.Sample.sample_type.in_(sample_types))
+    if search:
+        query = query.filter(
+            models.Sample.name.contains(search) |
+            models.Sample.description.contains(search)
+        )
+    if created_from:
+        query = query.filter(models.Sample.created_at >= created_from)
+    if created_to:
+        query = query.filter(models.Sample.created_at <= created_to)
+    if updated_from:
+        query = query.filter(models.Sample.updated_at >= updated_from)
+    if updated_to:
+        query = query.filter(models.Sample.updated_at <= updated_to)
+
+    items, total, page, pages, per_page = pagination.paginate(
+        query,
+        sortable_columns={"id", "name", "created_at", "updated_at",
+                          "status", "sample_type", "project_id"},
+    )
+
     return success_response(
         data=items,
         message="OK",
         total=total,
+        pagination=pagination.pagination_block(total, page, pages, per_page),
     )
 
 
@@ -698,4 +863,218 @@ def delete_sample(
     return success_response(
         data={"id": sample_id},
         message="Sample deleted successfully",
+    )
+
+
+# =============================================================================
+# Bulk endpoints — atomic (single commit per call). All require auth; role
+# policies vary per endpoint.
+# =============================================================================
+
+
+def _bulk_failed(status_code: int, message: str, code: str, details: dict):
+    """Helper to raise a uniform APIError from a bulk CRUD failure."""
+    raise APIError(
+        status_code=status_code,
+        message=message,
+        code=code,
+        details=details,
+    )
+
+
+@app.post(
+    "/bulk/projects",
+    response_model=None,
+    status_code=201
+)
+def bulk_create_projects(
+    payload: schemas.BulkProjectsCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.require_role("admin", "researcher")),
+):
+
+    created = crud.bulk_create_projects(db, payload.items)
+
+    if created is None:
+        _bulk_failed(409, "Bulk project create failed", CONFLICT, {})
+
+    return success_response(
+        data={
+            "created": [p.id for p in created],
+            "count": len(created),
+        },
+        message=f"{len(created)} projects created",
+    )
+
+
+@app.put(
+    "/bulk/projects",
+    response_model=None
+)
+def bulk_update_projects(
+    payload: schemas.BulkProjectsUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.require_role("admin", "researcher")),
+):
+
+    result = crud.bulk_update_projects(db, payload.items)
+
+    if result is None:
+        _bulk_failed(409, "Bulk project update failed", CONFLICT, {})
+    if isinstance(result, dict) and "missing_ids" in result:
+        _bulk_failed(
+            404,
+            "Some projects not found",
+            NOT_FOUND,
+            result,
+        )
+
+    return success_response(
+        data={
+            "updated": [p.id for p in result],
+            "count": len(result),
+        },
+        message=f"{len(result)} projects updated",
+    )
+
+
+@app.delete(
+    "/bulk/projects",
+    response_model=None
+)
+def bulk_delete_projects(
+    payload: schemas.BulkProjectsDelete,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.require_role("admin")),
+):
+
+    result = crud.bulk_delete_projects(db, payload.project_ids)
+
+    if isinstance(result, dict) and "missing_ids" in result:
+        _bulk_failed(
+            404,
+            "Some projects not found",
+            NOT_FOUND,
+            result,
+        )
+    if isinstance(result, dict) and "blocked_by" in result:
+        _bulk_failed(
+            409,
+            "Projects blocked by existing tasks or samples",
+            CONFLICT,
+            result,
+        )
+    if result is None:
+        _bulk_failed(409, "Bulk project delete failed", CONFLICT, {})
+
+    return success_response(
+        data={"deleted": result, "count": len(result)},
+        message=f"{len(result)} projects deleted",
+    )
+
+
+@app.post(
+    "/bulk/tasks/assign",
+    response_model=None
+)
+def bulk_assign_tasks(
+    payload: schemas.BulkTaskAssign,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.require_role("admin", "researcher")),
+):
+
+    result = crud.bulk_assign_tasks(db, payload.task_ids, payload.assignee_id)
+
+    if isinstance(result, dict) and result.get("assignee_missing"):
+        _bulk_failed(
+            404,
+            "Assignee not found or inactive",
+            NOT_FOUND,
+            {"assignee_id": payload.assignee_id},
+        )
+    if isinstance(result, dict) and "missing_ids" in result:
+        _bulk_failed(
+            404,
+            "Some tasks not found",
+            NOT_FOUND,
+            result,
+        )
+    if result is None:
+        _bulk_failed(409, "Bulk task assign failed", CONFLICT, {})
+
+    return success_response(
+        data=result,
+        message=f"Assigned {result['count']} tasks",
+    )
+
+
+@app.post(
+    "/bulk/inventory/quantities",
+    response_model=None
+)
+def bulk_update_inventory_quantities(
+    payload: schemas.BulkInventoryQuantities,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(
+        auth.require_role("admin", "researcher", "technician")
+    ),
+):
+
+    result = crud.bulk_update_inventory_quantities(db, payload.items)
+
+    if isinstance(result, dict) and "missing_ids" in result:
+        _bulk_failed(
+            404,
+            "Some inventory items not found",
+            NOT_FOUND,
+            result,
+        )
+    if isinstance(result, dict) and "would_go_negative" in result:
+        _bulk_failed(
+            422,
+            "Some deltas would result in negative quantity",
+            VALIDATION_ERROR,
+            result,
+        )
+    if result is None:
+        _bulk_failed(409, "Bulk inventory update failed", CONFLICT, {})
+
+    return success_response(
+        data={
+            "updated": [row.id for row in result],
+            "count": len(result),
+        },
+        message=f"{len(result)} inventory rows updated",
+    )
+
+
+@app.post(
+    "/bulk/samples",
+    response_model=None,
+    status_code=201
+)
+def bulk_register_samples(
+    payload: schemas.BulkSamplesCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.require_role("admin", "researcher")),
+):
+
+    result = crud.bulk_register_samples(db, payload.samples)
+
+    if isinstance(result, dict) and "missing_project_ids" in result:
+        _bulk_failed(
+            404,
+            "Some samples reference missing projects",
+            NOT_FOUND,
+            result,
+        )
+    if result is None:
+        _bulk_failed(409, "Bulk sample create failed", CONFLICT, {})
+
+    return success_response(
+        data={
+            "created": [s.id for s in result],
+            "count": len(result),
+        },
+        message=f"{len(result)} samples registered",
     )
