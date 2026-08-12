@@ -17,6 +17,9 @@ ProjectStatus = Literal["active", "completed", "archived", "on_hold"]
 TaskStatus = Literal["pending", "in_progress", "completed", "blocked"]
 Priority = Literal["low", "medium", "high", "critical"]
 SampleStatus = Literal["available", "reserved", "consumed", "disposed"]
+AttachmentKind = Literal["image", "dataset", "other"]
+ImportExportResource = Literal["projects", "tasks", "inventory", "samples"]
+ImportExportFormat = Literal["csv", "xlsx"]
 
 
 # --- User schemas -------------------------------------------------------------
@@ -141,6 +144,7 @@ class InventoryBase(BaseModel):
     unit: str = Field(default="unit", min_length=1, max_length=50)
     location: str = Field(..., min_length=1, max_length=200)
     supplier: Optional[str] = None
+    barcode: Optional[str] = Field(default=None, min_length=1, max_length=100)
 
 
 class InventoryCreate(InventoryBase):
@@ -155,6 +159,7 @@ class InventoryUpdate(BaseModel):
     unit: Optional[str] = Field(default=None, min_length=1, max_length=50)
     location: Optional[str] = Field(default=None, min_length=1, max_length=200)
     supplier: Optional[str] = None
+    barcode: Optional[str] = Field(default=None, min_length=1, max_length=100)
 
 
 class InventoryResponse(InventoryBase):
@@ -196,6 +201,49 @@ class SampleResponse(SampleBase):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# --- Attachment schemas ------------------------------------------------------
+
+
+class ProjectAttachmentResponse(BaseModel):
+    id: int
+    project_id: int
+    filename: str
+    content_type: Optional[str] = None
+    size_bytes: int
+    uploaded_by: Optional[int] = None
+    uploaded_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SampleAttachmentResponse(BaseModel):
+    id: int
+    sample_id: int
+    filename: str
+    content_type: Optional[str] = None
+    size_bytes: int
+    kind: AttachmentKind
+    uploaded_by: Optional[int] = None
+    uploaded_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# --- Barcode schemas ---------------------------------------------------------
+
+
+class BarcodeScanRequest(BaseModel):
+    barcode: str = Field(..., min_length=1, max_length=100)
+
+
+class InventoryQuantityAdjustment(BaseModel):
+    delta: int
+
+
+class InventoryBarcodeQuantityAdjustment(BarcodeScanRequest):
+    delta: int
 
 
 # --- Bulk input schemas -------------------------------------------------------

@@ -486,6 +486,18 @@ def get_inventory_item(
     )
 
 
+def get_inventory_item_by_barcode(
+    db: Session,
+    barcode: str
+) -> Optional[models.Inventory]:
+
+    return (
+        db.query(models.Inventory)
+        .filter(models.Inventory.barcode == barcode)
+        .first()
+    )
+
+
 def get_inventory(
     db: Session,
     skip: int = 0,
@@ -530,7 +542,8 @@ def get_inventory_filtered(
         query = query.filter(
             models.Inventory.name.contains(search) |
             models.Inventory.description.contains(search) |
-            models.Inventory.supplier.contains(search)
+            models.Inventory.supplier.contains(search) |
+            models.Inventory.barcode.contains(search)
         )
     if created_from:
         query = query.filter(models.Inventory.created_at >= created_from)
@@ -568,11 +581,18 @@ def create_inventory_item(
         quantity=inventory_item.quantity,
         unit=inventory_item.unit,
         location=inventory_item.location,
-        supplier=inventory_item.supplier
+        supplier=inventory_item.supplier,
+        barcode=inventory_item.barcode,
     )
 
     db.add(db_inventory_item)
-    db.commit()
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return None
+
     db.refresh(db_inventory_item)
 
     return db_inventory_item
@@ -596,7 +616,12 @@ def update_inventory_item(
 
     db_inventory_item.updated_at = datetime.now(timezone.utc)
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return {"barcode_conflict": True}
+
     db.refresh(db_inventory_item)
 
     return db_inventory_item
@@ -769,6 +794,172 @@ def delete_sample(
     db.commit()
 
     return True
+
+
+def create_project_attachment(
+    db: Session,
+    project_id: int,
+    filename: str,
+    stored_path: str,
+    content_type: Optional[str],
+    size_bytes: int,
+    uploaded_by: Optional[int] = None,
+):
+    project = get_project(db, project_id)
+
+    if project is None:
+        return None
+
+    attachment = models.ProjectAttachment(
+        project_id=project_id,
+        filename=filename,
+        stored_path=stored_path,
+        content_type=content_type,
+        size_bytes=size_bytes,
+        uploaded_by=uploaded_by,
+    )
+
+    db.add(attachment)
+    db.commit()
+    db.refresh(attachment)
+
+    return attachment
+
+
+def list_project_attachments(
+    db: Session,
+    project_id: int,
+):
+    if get_project(db, project_id) is None:
+        return None
+
+    return (
+        db.query(models.ProjectAttachment)
+        .filter(models.ProjectAttachment.project_id == project_id)
+        .order_by(models.ProjectAttachment.uploaded_at.desc())
+        .all()
+    )
+
+
+def get_project_attachment(
+    db: Session,
+    project_id: int,
+    attachment_id: int,
+) -> Optional[models.ProjectAttachment]:
+    return (
+        db.query(models.ProjectAttachment)
+        .filter(
+            models.ProjectAttachment.project_id == project_id,
+            models.ProjectAttachment.id == attachment_id,
+        )
+        .first()
+    )
+
+
+def delete_project_attachment(
+    db: Session,
+    project_id: int,
+    attachment_id: int,
+):
+    attachment = get_project_attachment(db, project_id, attachment_id)
+
+    if attachment is None:
+        return None
+
+    deleted = {
+        "id": attachment.id,
+        "project_id": attachment.project_id,
+        "stored_path": attachment.stored_path,
+    }
+
+    db.delete(attachment)
+    db.commit()
+
+    return deleted
+
+
+def create_sample_attachment(
+    db: Session,
+    sample_id: int,
+    filename: str,
+    stored_path: str,
+    content_type: Optional[str],
+    size_bytes: int,
+    kind: str,
+    uploaded_by: Optional[int] = None,
+):
+    sample = get_sample(db, sample_id)
+
+    if sample is None:
+        return None
+
+    attachment = models.SampleAttachment(
+        sample_id=sample_id,
+        filename=filename,
+        stored_path=stored_path,
+        content_type=content_type,
+        size_bytes=size_bytes,
+        kind=kind,
+        uploaded_by=uploaded_by,
+    )
+
+    db.add(attachment)
+    db.commit()
+    db.refresh(attachment)
+
+    return attachment
+
+
+def list_sample_attachments(
+    db: Session,
+    sample_id: int,
+):
+    if get_sample(db, sample_id) is None:
+        return None
+
+    return (
+        db.query(models.SampleAttachment)
+        .filter(models.SampleAttachment.sample_id == sample_id)
+        .order_by(models.SampleAttachment.uploaded_at.desc())
+        .all()
+    )
+
+
+def get_sample_attachment(
+    db: Session,
+    sample_id: int,
+    attachment_id: int,
+) -> Optional[models.SampleAttachment]:
+    return (
+        db.query(models.SampleAttachment)
+        .filter(
+            models.SampleAttachment.sample_id == sample_id,
+            models.SampleAttachment.id == attachment_id,
+        )
+        .first()
+    )
+
+
+def delete_sample_attachment(
+    db: Session,
+    sample_id: int,
+    attachment_id: int,
+):
+    attachment = get_sample_attachment(db, sample_id, attachment_id)
+
+    if attachment is None:
+        return None
+
+    deleted = {
+        "id": attachment.id,
+        "sample_id": attachment.sample_id,
+        "stored_path": attachment.stored_path,
+    }
+
+    db.delete(attachment)
+    db.commit()
+
+    return deleted
 
 
 # =============================================================================

@@ -79,6 +79,39 @@ All routes are mounted under the four resource collections. Each supports list, 
 
 `tasks` and `samples` require a valid `project_id`; the API returns `404 NOT_FOUND` if the referenced project does not exist.
 
+### Attachments
+
+Uploaded files are stored on disk under `UPLOAD_ROOT` (default: `uploads/`) and the API stores metadata in SQLite.
+
+| Resource | Routes |
+| --- | --- |
+| Project documents | `POST/GET /projects/{project_id}/attachments/`, `GET/DELETE /projects/{project_id}/attachments/{attachment_id}`, `GET /projects/{project_id}/attachments/{attachment_id}/download` |
+| Sample images/datasets | `POST/GET /samples/{sample_id}/attachments/`, `GET/DELETE /samples/{sample_id}/attachments/{attachment_id}`, `GET /samples/{sample_id}/attachments/{attachment_id}/download` |
+
+Sample uploads accept `kind=image`, `kind=dataset`, or `kind=other` as a multipart form field.
+
+### Barcode scanning
+
+Inventory rows support an optional unique `barcode` field.
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `POST` | `/inventory/scan` | Look up an inventory item from a scanned barcode payload. |
+| `POST` | `/inventory/scan/quantity` | Apply a signed quantity delta from a barcode scan. |
+| `GET` | `/inventory/barcode/{barcode}` | Look up an item by barcode from URL/path clients. |
+
+### Import/export
+
+CSV and Excel `.xlsx` import/export is available for `projects`, `tasks`, `inventory`, and `samples`.
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `GET` | `/export/{resource}?file_format=csv` | Download resource data as CSV. |
+| `GET` | `/export/{resource}?file_format=xlsx` | Download resource data as Excel. |
+| `POST` | `/import/{resource}` | Upload a `.csv` or `.xlsx` file with a header row. |
+
+Generated columns like `id`, `created_at`, and `updated_at` are ignored during import. Each import response reports `imported`, `failed`, `total_rows`, `created_ids`, and per-row errors.
+
 ## Response envelope
 
 Every endpoint — success or error — returns the same shape:

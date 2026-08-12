@@ -1,6 +1,16 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -110,6 +120,12 @@ class Project(Base):
         cascade="all, delete-orphan"
     )
 
+    attachments = relationship(
+        "ProjectAttachment",
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+
 
 class Task(Base):
     __tablename__ = "tasks"
@@ -164,6 +180,12 @@ class Inventory(Base):
     unit = Column(String(50), nullable=False, default="unit")
     location = Column(String(200), nullable=False)
     supplier = Column(String(200), nullable=True)
+    barcode = Column(
+        String(100),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
 
     created_at = Column(
         DateTime,
@@ -206,3 +228,75 @@ class Sample(Base):
     )
 
     project = relationship("Project", back_populates="samples")
+
+    attachments = relationship(
+        "SampleAttachment",
+        back_populates="sample",
+        cascade="all, delete-orphan",
+    )
+
+
+class ProjectAttachment(Base):
+    """File metadata for a document attached to a project.
+
+    The bytes live on disk under ``UPLOAD_ROOT/projects/<project_id>/``;
+    only the path, size, and original filename are stored here so the DB
+    row stays small and portable.
+    """
+
+    __tablename__ = "project_attachments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(
+        Integer,
+        ForeignKey("projects.id"),
+        nullable=False,
+        index=True,
+    )
+    filename = Column(String(255), nullable=False)
+    stored_path = Column(String(500), nullable=False)
+    content_type = Column(String(100), nullable=True)
+    size_bytes = Column(BigInteger, nullable=False, default=0)
+    uploaded_by = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=True,
+    )
+    uploaded_at = Column(DateTime, default=_utcnow)
+
+    project = relationship("Project", back_populates="attachments")
+
+
+class SampleAttachment(Base):
+    """File metadata for an image / dataset attached to a sample.
+
+    Mirrors :class:`ProjectAttachment`; one sample can have many attachments
+    (e.g. multiple images from different angles plus a dataset CSV).
+    """
+
+    __tablename__ = "sample_attachments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sample_id = Column(
+        Integer,
+        ForeignKey("samples.id"),
+        nullable=False,
+        index=True,
+    )
+    filename = Column(String(255), nullable=False)
+    stored_path = Column(String(500), nullable=False)
+    content_type = Column(String(100), nullable=True)
+    size_bytes = Column(BigInteger, nullable=False, default=0)
+    kind = Column(
+        String(20),
+        nullable=False,
+        default="image",
+    )  # "image" | "dataset" | "other"
+    uploaded_by = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=True,
+    )
+    uploaded_at = Column(DateTime, default=_utcnow)
+
+    sample = relationship("Sample", back_populates="attachments")

@@ -1,16 +1,27 @@
+import csv
+import io
+import mimetypes
+import os
+import re
+import shutil
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Query, Request, status
+from fastapi import Depends, FastAPI, File, Form, Query, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
+from openpyxl import Workbook, load_workbook
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app import auth, crud, models, schemas
 from app.database import Base, engine, get_db
 from app.dependencies import PaginationParams
 from app.migrations import (
+    run_inventory_barcode_migration,
     run_task_assignee_migration,
     run_user_auth_columns_migration,
 )
@@ -29,6 +40,7 @@ from app.utils import (
 Base.metadata.create_all(bind=engine)
 run_task_assignee_migration(engine)
 run_user_auth_columns_migration(engine)
+run_inventory_barcode_migration(engine)
 
 
 app = FastAPI(
@@ -36,6 +48,351 @@ app = FastAPI(
     description="API for managing research laboratory resources.",
     version="1.0.0"
 )
+
+
+_UPLOAD_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_SKIP_IMPORT_FIELDS = {"id", "created_at", "updated_at", "assignee_id"}
+_INTEGER_IMPORT_FIELDS = {"owner_id", "project_id", "quantity"}
+
+
+RESOURCE_CONFIG: dict[str, dict[str, Any]] = {
+    "projects": {
+        "model": models.Project,
+        "schema": schemas.ProjectCreate,
+        "create": crud.create_project,
+        "fields": [
+            "id",
+            "title",
+            "description",
+            "status",
+            "priority",
+            "owner_id",
+            "created_at",
+            "updated_at",
+        ],
+    },
+    "tasks": {
+        "model": models.Task,
+        "schema": schemas.TaskCreate,
+        "create": crud.create_task,
+        "fields": [
+            "id",
+            "title",
+            "description",
+            "status",
+            "priority",
+            "project_id",
+            "assignee_id",
+            "created_at",
+            "updated_at",
+        ],
+    },
+    "inventory": {
+        "model": models.Inventory,
+        "schema": schemas.InventoryCreate,
+        "create": crud.create_inventory_item,
+        "fields": [
+            "id",
+            "name",
+            "description",
+            "category",
+            "quantity",
+            "unit",
+            "location",
+            "supplier",
+            "barcode",
+            "created_at",
+            "updated_at",
+        ],
+    },
+    "samples": {
+        "model": models.Sample,
+        "schema": schemas.SampleCreate,
+        "create": crud.create_sample,
+        "fields": [
+            "id",
+            "name",
+            "description",
+            "sample_type",
+            "status",
+            "storage_location",
+            "project_id",
+            "created_at",
+            "updated_at",
+        ],
+    },
+}
+
+
+def _safe_filename(filename: str) -> str:
+    base = Path(filename or "upload.bin").name
+    safe = _UPLOAD_NAME_RE.sub("_", base).strip("._")
+
+    if not safe:
+        return "upload.bin"
+
+    return safe[:200]
+
+
+def _upload_root() -> Path:
+    return Path(os.getenv("UPLOAD_ROOT", "uploads")).resolve()
+
+
+def _save_upload(upload: UploadFile, *path_parts: str) -> tuple[str, str, str, int]:
+    filename = _safe_filename(upload.filename or "upload.bin")
+    folder = _upload_root().joinpath(*path_parts)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    stored_path = folder / f"{uuid4().hex}_{filename}"
+
+    with stored_path.open("wb") as buffer:
+        shutil.copyfileobj(upload.file, buffer)
+
+    size_bytes = stored_path.stat().st_size
+    if size_bytes == 0:
+        stored_path.unlink(missing_ok=True)
+        raise APIError(
+            status_code=422,
+            message="Uploaded file is empty",
+            code=VALIDATION_ERROR,
+        )
+
+    content_type = (
+        upload.content_type
+        or mimetypes.guess_type(filename)[0]
+        or "application/octet-stream"
+    )
+
+    return filename, str(stored_path), content_type, size_bytes
+
+
+def _delete_stored_file(stored_path: Optional[str]) -> None:
+    if stored_path is None:
+        return
+
+    try:
+        Path(stored_path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _attachment_file_response(
+    attachment,
+    missing_message: str,
+) -> FileResponse:
+    path = Path(attachment.stored_path)
+
+    if not path.is_file():
+        raise APIError(
+            status_code=404,
+            message=missing_message,
+            code=NOT_FOUND,
+        )
+
+    media_type = (
+        attachment.content_type
+        or mimetypes.guess_type(attachment.filename)[0]
+        or "application/octet-stream"
+    )
+
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=attachment.filename,
+    )
+
+
+def _project_attachment_payload(attachment) -> dict:
+    payload = schemas.ProjectAttachmentResponse.model_validate(
+        attachment
+    ).model_dump()
+    payload["download_url"] = (
+        f"/projects/{attachment.project_id}/attachments/{attachment.id}/download"
+    )
+    return payload
+
+
+def _sample_attachment_payload(attachment) -> dict:
+    payload = schemas.SampleAttachmentResponse.model_validate(
+        attachment
+    ).model_dump()
+    payload["download_url"] = (
+        f"/samples/{attachment.sample_id}/attachments/{attachment.id}/download"
+    )
+    return payload
+
+
+def _serialize_export_value(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if value is None:
+        return ""
+    return value
+
+
+def _export_rows(resource: str, db: Session) -> tuple[list[str], list[dict]]:
+    config = RESOURCE_CONFIG[resource]
+    fields = config["fields"]
+    model = config["model"]
+    rows = db.query(model).order_by(model.id.asc()).all()
+
+    return fields, [
+        {
+            field: _serialize_export_value(getattr(row, field, None))
+            for field in fields
+        }
+        for row in rows
+    ]
+
+
+def _detect_import_format(
+    upload: UploadFile,
+    requested_format: Optional[str],
+) -> str:
+    if requested_format is not None:
+        return requested_format
+
+    suffix = Path(upload.filename or "").suffix.lower()
+
+    if suffix == ".csv":
+        return "csv"
+    if suffix == ".xlsx":
+        return "xlsx"
+
+    content_type = (upload.content_type or "").lower()
+
+    if "csv" in content_type:
+        return "csv"
+    if "spreadsheet" in content_type or "excel" in content_type:
+        return "xlsx"
+
+    raise APIError(
+        status_code=422,
+        message="Could not determine import format; use .csv, .xlsx, or file_format",
+        code=VALIDATION_ERROR,
+    )
+
+
+def _parse_csv_rows(contents: bytes) -> list[dict]:
+    try:
+        text = contents.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise APIError(
+            status_code=422,
+            message="CSV file must be UTF-8 encoded",
+            code=VALIDATION_ERROR,
+        ) from exc
+
+    reader = csv.DictReader(io.StringIO(text))
+
+    if not reader.fieldnames:
+        raise APIError(
+            status_code=422,
+            message="Import file must include a header row",
+            code=VALIDATION_ERROR,
+        )
+
+    return [
+        row for row in reader
+        if any(value not in (None, "") for value in row.values())
+    ]
+
+
+def _parse_xlsx_rows(contents: bytes) -> list[dict]:
+    try:
+        workbook = load_workbook(
+            io.BytesIO(contents),
+            read_only=True,
+            data_only=True,
+        )
+    except Exception as exc:
+        raise APIError(
+            status_code=422,
+            message="Excel import must be a valid .xlsx workbook",
+            code=VALIDATION_ERROR,
+            details=str(exc),
+        ) from exc
+
+    worksheet = workbook.active
+    rows = worksheet.iter_rows(values_only=True)
+
+    try:
+        headers = next(rows)
+    except StopIteration as exc:
+        raise APIError(
+            status_code=422,
+            message="Import file must include a header row",
+            code=VALIDATION_ERROR,
+        ) from exc
+
+    fieldnames = [
+        str(value).strip() if value is not None else ""
+        for value in headers
+    ]
+
+    if not any(fieldnames):
+        raise APIError(
+            status_code=422,
+            message="Import file must include a header row",
+            code=VALIDATION_ERROR,
+        )
+
+    parsed_rows = []
+    for values in rows:
+        if not any(value not in (None, "") for value in values):
+            continue
+        parsed_rows.append(dict(zip(fieldnames, values)))
+
+    workbook.close()
+    return parsed_rows
+
+
+def _parse_tabular_upload(upload: UploadFile, file_format: Optional[str]) -> list[dict]:
+    contents = upload.file.read()
+
+    if not contents:
+        raise APIError(
+            status_code=422,
+            message="Import file is empty",
+            code=VALIDATION_ERROR,
+        )
+
+    detected = _detect_import_format(upload, file_format)
+
+    if detected == "csv":
+        return _parse_csv_rows(contents)
+
+    return _parse_xlsx_rows(contents)
+
+
+def _normalize_import_row(row: dict, allowed_fields: list[str]) -> dict:
+    field_set = set(allowed_fields)
+    normalized = {}
+
+    for raw_key, raw_value in row.items():
+        if raw_key is None:
+            continue
+
+        key = str(raw_key).strip()
+
+        if key not in field_set or key in _SKIP_IMPORT_FIELDS:
+            continue
+
+        value = raw_value.strip() if isinstance(raw_value, str) else raw_value
+
+        if value in (None, ""):
+            continue
+
+        if (
+            key in _INTEGER_IMPORT_FIELDS
+            and isinstance(value, float)
+            and value.is_integer()
+        ):
+            value = int(value)
+
+        normalized[key] = value
+
+    return normalized
 
 
 @app.exception_handler(APIError)
@@ -87,6 +444,129 @@ def health_check():
     return success_response(
         data={"status": "healthy"},
         message="Service is healthy",
+    )
+
+
+@app.get(
+    "/export/{resource}",
+    response_model=None
+)
+def export_resource_data(
+    resource: schemas.ImportExportResource,
+    file_format: schemas.ImportExportFormat = Query("csv"),
+    db: Session = Depends(get_db),
+):
+
+    fields, rows = _export_rows(resource, db)
+    filename = f"{resource}.{file_format}"
+
+    if file_format == "csv":
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            },
+        )
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = resource[:31]
+    worksheet.append(fields)
+
+    for row in rows:
+        worksheet.append([row[field] for field in fields])
+
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+
+    return StreamingResponse(
+        output,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        },
+    )
+
+
+@app.post(
+    "/import/{resource}",
+    response_model=None,
+    status_code=201
+)
+def import_resource_data(
+    resource: schemas.ImportExportResource,
+    file: UploadFile = File(...),
+    file_format: Optional[schemas.ImportExportFormat] = Query(None),
+    db: Session = Depends(get_db),
+):
+
+    config = RESOURCE_CONFIG[resource]
+    rows = _parse_tabular_upload(file, file_format)
+    created_ids = []
+    row_errors = []
+
+    for row_number, row in enumerate(rows, start=2):
+        normalized = _normalize_import_row(row, config["fields"])
+
+        try:
+            item = config["schema"].model_validate(normalized)
+        except ValidationError as exc:
+            row_errors.append(
+                {
+                    "row": row_number,
+                    "errors": exc.errors(),
+                }
+            )
+            continue
+
+        try:
+            created = config["create"](db, item)
+        except Exception as exc:
+            db.rollback()
+            row_errors.append(
+                {
+                    "row": row_number,
+                    "errors": [str(exc)],
+                }
+            )
+            continue
+
+        if created is None:
+            row_errors.append(
+                {
+                    "row": row_number,
+                    "errors": [
+                        "Referenced record missing or unique value already exists"
+                    ],
+                }
+            )
+            continue
+
+        created_ids.append(created.id)
+
+    failed = len(row_errors)
+    imported = len(created_ids)
+
+    return success_response(
+        data={
+            "resource": resource,
+            "imported": imported,
+            "failed": failed,
+            "total_rows": len(rows),
+            "created_ids": created_ids,
+            "errors": row_errors,
+        },
+        message=f"Imported {imported} {resource} rows",
     )
 
 
@@ -423,6 +903,148 @@ def delete_project(
 
 
 @app.post(
+    "/projects/{project_id}/attachments/",
+    response_model=None,
+    status_code=201
+)
+def upload_project_attachment(
+    project_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+
+    filename, stored_path, content_type, size_bytes = _save_upload(
+        file,
+        "projects",
+        str(project_id),
+    )
+
+    attachment = crud.create_project_attachment(
+        db,
+        project_id=project_id,
+        filename=filename,
+        stored_path=stored_path,
+        content_type=content_type,
+        size_bytes=size_bytes,
+    )
+
+    if attachment is None:
+        _delete_stored_file(stored_path)
+        raise APIError(
+            status_code=404,
+            message="Project not found",
+            code=NOT_FOUND,
+        )
+
+    return success_response(
+        data=_project_attachment_payload(attachment),
+        message="Project attachment uploaded",
+    )
+
+
+@app.get(
+    "/projects/{project_id}/attachments/",
+    response_model=None
+)
+def list_project_attachments(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+
+    attachments = crud.list_project_attachments(db, project_id)
+
+    if attachments is None:
+        raise APIError(
+            status_code=404,
+            message="Project not found",
+            code=NOT_FOUND,
+        )
+
+    return success_response(
+        data=[_project_attachment_payload(item) for item in attachments],
+        message="OK",
+        total=len(attachments),
+    )
+
+
+@app.get(
+    "/projects/{project_id}/attachments/{attachment_id}",
+    response_model=None
+)
+def get_project_attachment(
+    project_id: int,
+    attachment_id: int,
+    db: Session = Depends(get_db),
+):
+
+    attachment = crud.get_project_attachment(db, project_id, attachment_id)
+
+    if attachment is None:
+        raise APIError(
+            status_code=404,
+            message="Project attachment not found",
+            code=NOT_FOUND,
+        )
+
+    return success_response(
+        data=_project_attachment_payload(attachment),
+        message="OK",
+    )
+
+
+@app.get(
+    "/projects/{project_id}/attachments/{attachment_id}/download",
+    response_model=None
+)
+def download_project_attachment(
+    project_id: int,
+    attachment_id: int,
+    db: Session = Depends(get_db),
+):
+
+    attachment = crud.get_project_attachment(db, project_id, attachment_id)
+
+    if attachment is None:
+        raise APIError(
+            status_code=404,
+            message="Project attachment not found",
+            code=NOT_FOUND,
+        )
+
+    return _attachment_file_response(
+        attachment,
+        "Project attachment file not found",
+    )
+
+
+@app.delete(
+    "/projects/{project_id}/attachments/{attachment_id}",
+    response_model=None
+)
+def delete_project_attachment(
+    project_id: int,
+    attachment_id: int,
+    db: Session = Depends(get_db),
+):
+
+    deleted = crud.delete_project_attachment(db, project_id, attachment_id)
+
+    if deleted is None:
+        raise APIError(
+            status_code=404,
+            message="Project attachment not found",
+            code=NOT_FOUND,
+        )
+
+    _delete_stored_file(deleted["stored_path"])
+
+    return success_response(
+        data={"id": attachment_id, "project_id": project_id},
+        message="Project attachment deleted successfully",
+    )
+
+
+@app.post(
     "/tasks/",
     response_model=None,
     status_code=201
@@ -584,6 +1206,14 @@ def create_inventory_item(
 ):
 
     created = crud.create_inventory_item(db, inventory_item)
+
+    if created is None:
+        raise APIError(
+            status_code=409,
+            message="Inventory barcode already exists",
+            code=CONFLICT,
+        )
+
     return success_response(
         data=created,
         message="Inventory item created",
@@ -619,7 +1249,8 @@ def get_inventory(
         query = query.filter(
             models.Inventory.name.contains(search) |
             models.Inventory.description.contains(search) |
-            models.Inventory.supplier.contains(search)
+            models.Inventory.supplier.contains(search) |
+            models.Inventory.barcode.contains(search)
         )
     if created_from:
         query = query.filter(models.Inventory.created_at >= created_from)
@@ -641,6 +1272,101 @@ def get_inventory(
         message="OK",
         total=total,
         pagination=pagination.pagination_block(total, page, pages, per_page),
+    )
+
+
+@app.post(
+    "/inventory/scan",
+    response_model=None
+)
+def scan_inventory_barcode(
+    payload: schemas.BarcodeScanRequest,
+    db: Session = Depends(get_db),
+):
+
+    inventory_item = crud.get_inventory_item_by_barcode(db, payload.barcode)
+
+    if inventory_item is None:
+        raise APIError(
+            status_code=404,
+            message="Inventory item not found for barcode",
+            code=NOT_FOUND,
+            details={"barcode": payload.barcode},
+        )
+
+    return success_response(
+        data=schemas.InventoryResponse.model_validate(inventory_item),
+        message="Inventory item scanned",
+    )
+
+
+@app.post(
+    "/inventory/scan/quantity",
+    response_model=None
+)
+def adjust_inventory_quantity_by_barcode(
+    payload: schemas.InventoryBarcodeQuantityAdjustment,
+    db: Session = Depends(get_db),
+):
+
+    inventory_item = crud.get_inventory_item_by_barcode(db, payload.barcode)
+
+    if inventory_item is None:
+        raise APIError(
+            status_code=404,
+            message="Inventory item not found for barcode",
+            code=NOT_FOUND,
+            details={"barcode": payload.barcode},
+        )
+
+    next_quantity = inventory_item.quantity + payload.delta
+
+    if next_quantity < 0:
+        raise APIError(
+            status_code=422,
+            message="Quantity adjustment would result in negative stock",
+            code=VALIDATION_ERROR,
+            details={
+                "barcode": payload.barcode,
+                "current": inventory_item.quantity,
+                "delta": payload.delta,
+            },
+        )
+
+    updated = crud.update_inventory_item(
+        db,
+        inventory_item.id,
+        schemas.InventoryUpdate(quantity=next_quantity),
+    )
+
+    return success_response(
+        data=schemas.InventoryResponse.model_validate(updated),
+        message="Inventory quantity adjusted",
+    )
+
+
+@app.get(
+    "/inventory/barcode/{barcode}",
+    response_model=None
+)
+def get_inventory_item_by_barcode(
+    barcode: str,
+    db: Session = Depends(get_db),
+):
+
+    inventory_item = crud.get_inventory_item_by_barcode(db, barcode)
+
+    if inventory_item is None:
+        raise APIError(
+            status_code=404,
+            message="Inventory item not found for barcode",
+            code=NOT_FOUND,
+            details={"barcode": barcode},
+        )
+
+    return success_response(
+        data=schemas.InventoryResponse.model_validate(inventory_item),
+        message="OK",
     )
 
 
@@ -683,6 +1409,13 @@ def update_inventory_item(
         inventory_id,
         inventory_data
     )
+
+    if isinstance(inventory_item, dict) and inventory_item.get("barcode_conflict"):
+        raise APIError(
+            status_code=409,
+            message="Inventory barcode already exists",
+            code=CONFLICT,
+        )
 
     if inventory_item is None:
         raise APIError(
@@ -863,6 +1596,150 @@ def delete_sample(
     return success_response(
         data={"id": sample_id},
         message="Sample deleted successfully",
+    )
+
+
+@app.post(
+    "/samples/{sample_id}/attachments/",
+    response_model=None,
+    status_code=201
+)
+def upload_sample_attachment(
+    sample_id: int,
+    kind: schemas.AttachmentKind = Form("image"),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+
+    filename, stored_path, content_type, size_bytes = _save_upload(
+        file,
+        "samples",
+        str(sample_id),
+    )
+
+    attachment = crud.create_sample_attachment(
+        db,
+        sample_id=sample_id,
+        filename=filename,
+        stored_path=stored_path,
+        content_type=content_type,
+        size_bytes=size_bytes,
+        kind=kind,
+    )
+
+    if attachment is None:
+        _delete_stored_file(stored_path)
+        raise APIError(
+            status_code=404,
+            message="Sample not found",
+            code=NOT_FOUND,
+        )
+
+    return success_response(
+        data=_sample_attachment_payload(attachment),
+        message="Sample attachment uploaded",
+    )
+
+
+@app.get(
+    "/samples/{sample_id}/attachments/",
+    response_model=None
+)
+def list_sample_attachments(
+    sample_id: int,
+    db: Session = Depends(get_db),
+):
+
+    attachments = crud.list_sample_attachments(db, sample_id)
+
+    if attachments is None:
+        raise APIError(
+            status_code=404,
+            message="Sample not found",
+            code=NOT_FOUND,
+        )
+
+    return success_response(
+        data=[_sample_attachment_payload(item) for item in attachments],
+        message="OK",
+        total=len(attachments),
+    )
+
+
+@app.get(
+    "/samples/{sample_id}/attachments/{attachment_id}",
+    response_model=None
+)
+def get_sample_attachment(
+    sample_id: int,
+    attachment_id: int,
+    db: Session = Depends(get_db),
+):
+
+    attachment = crud.get_sample_attachment(db, sample_id, attachment_id)
+
+    if attachment is None:
+        raise APIError(
+            status_code=404,
+            message="Sample attachment not found",
+            code=NOT_FOUND,
+        )
+
+    return success_response(
+        data=_sample_attachment_payload(attachment),
+        message="OK",
+    )
+
+
+@app.get(
+    "/samples/{sample_id}/attachments/{attachment_id}/download",
+    response_model=None
+)
+def download_sample_attachment(
+    sample_id: int,
+    attachment_id: int,
+    db: Session = Depends(get_db),
+):
+
+    attachment = crud.get_sample_attachment(db, sample_id, attachment_id)
+
+    if attachment is None:
+        raise APIError(
+            status_code=404,
+            message="Sample attachment not found",
+            code=NOT_FOUND,
+        )
+
+    return _attachment_file_response(
+        attachment,
+        "Sample attachment file not found",
+    )
+
+
+@app.delete(
+    "/samples/{sample_id}/attachments/{attachment_id}",
+    response_model=None
+)
+def delete_sample_attachment(
+    sample_id: int,
+    attachment_id: int,
+    db: Session = Depends(get_db),
+):
+
+    deleted = crud.delete_sample_attachment(db, sample_id, attachment_id)
+
+    if deleted is None:
+        raise APIError(
+            status_code=404,
+            message="Sample attachment not found",
+            code=NOT_FOUND,
+        )
+
+    _delete_stored_file(deleted["stored_path"])
+
+    return success_response(
+        data={"id": attachment_id, "sample_id": sample_id},
+        message="Sample attachment deleted successfully",
     )
 
 

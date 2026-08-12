@@ -36,3 +36,4 @@ Thumbs.db
 *.sqlite3
 .env
 .env.local
+uploads/

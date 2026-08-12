@@ -107,3 +107,36 @@ def run_user_auth_columns_migration(engine: Engine) -> bool:
             exc,
         )
         return False
+
+
+def run_inventory_barcode_migration(engine: Engine) -> bool:
+    """Add ``inventory.barcode`` to an existing SQLite DB.
+
+    The barcode column is nullable and unique; older rows get NULL.
+    Returns True when an ALTER was actually issued.
+    Never raises.
+    """
+    try:
+        with engine.begin() as conn:
+            altered = _add_column_if_missing(
+                conn,
+                table="inventory",
+                column="barcode",
+                ddl="VARCHAR(100)",
+            )
+            conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "ux_inventory_barcode ON inventory (barcode)"
+            )
+            return altered
+    except OperationalError as exc:
+        logger.warning(
+            "run_inventory_barcode_migration failed (non-fatal): %s", exc
+        )
+        return False
+    except Exception as exc:  # pragma: no cover - safety net
+        logger.warning(
+            "run_inventory_barcode_migration unexpected error (non-fatal): %s",
+            exc,
+        )
+        return False
