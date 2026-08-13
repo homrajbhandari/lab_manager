@@ -1,0 +1,298 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        default: staging
+        options:
+          - development
+          - staging
+          - production
+      image_tag:
+        description: "Image tag to deploy (defaults to current SHA)"
+        required: false
+        type: string
+        default: ""
+  push:
+    branches: [main]
+  # Allow staging/prod to be triggered from the Actions tab.
+
+concurrency:
+  group: deploy-${{ inputs.environment || github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+  IMAGE_NAME: ${{ github.repository }}/lab-manager
+  REGISTRY: ghcr.io
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Resolve the image tag to deploy. On push to main this defaults to
+  #    the just-built SHA image; on workflow_dispatch the user supplies it.
+  # ---------------------------------------------------------------------------
+  resolve:
+    name: Resolve image tag
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+      environment: ${{ steps.resolve.outputs.environment }}
+    steps:
+      - name: Determine target
+        id: resolve
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          INPUT_TAG: ${{ inputs.image_tag }}
+          INPUT_ENV: ${{ inputs.environment }}
+        run: |
+          if [[ "${EVENT}" == "push" ]]; then
+            echo "environment=development" >> "$GITHUB_OUTPUT"
+            echo "image=${REGISTRY}/${IMAGE_NAME}:sha-${SHA}" >> "$GITHUB_OUTPUT"
+          else
+            echo "environment=${INPUT_ENV}" >> "$GITHUB_OUTPUT"
+            if [[ -z "${INPUT_TAG}" ]]; then
+              echo "image=${REGISTRY}/${IMAGE_NAME}:sha-${SHA}" >> "$GITHUB_OUTPUT"
+            else
+              echo "image=${REGISTRY}/${IMAGE_NAME}:${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+          echo "Deploying ${IMAGE} to ${ENVIRONMENT}" >&2
+        shell: bash
+
+  # ---------------------------------------------------------------------------
+  # 2. Smoke tests — run against the freshly-deployed environment.
+  # ---------------------------------------------------------------------------
+  smoke:
+    name: Smoke tests (${{ inputs.environment || 'development' }})
+    needs: resolve
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.resolve.outputs.environment }}
+      url: ${{ steps.url.outputs.url }}
+    steps:
+      - name: Resolve target URL
+        id: url
+        env:
+          ENV: ${{ needs.resolve.outputs.environment }}
+        run: |
+          case "${ENV}" in
+            development) echo "url=http://localhost:8000" >> "$GITHUB_OUTPUT" ;;
+            staging)     echo "url=https://staging.lab-manager.example.com" >> "$GITHUB_OUTPUT" ;;
+            production)  echo "url=https://app.lab-manager.example.com"   >> "$GITHUB_OUTPUT" ;;
+            *)           echo "url=http://localhost:8000"                >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Wait for deployment
+        run: |
+          for i in {1..30}; do
+            if curl -fsS --max-time 5 "${{ steps.url.outputs.url }}/health" >/dev/null 2>&1; then
+              echo "Service is responding"
+              exit 0
+            fi
+            echo "Waiting... ($i)"
+            sleep 5
+          done
+          echo "Service did not become healthy in time"
+          exit 1
+
+      - name: Run smoke tests
+        env:
+          BASE_URL: ${{ steps.url.outputs.url }}
+        run: |
+          # /health
+          curl -fsS --max-time 5 "${BASE_URL}/health" | tee /tmp/health.json
+          echo
+          # /docs must render (proves static + routes are wired)
+          curl -fsS --max-time 5 -o /dev/null -w "HTTP %{http_code}\n" "${BASE_URL}/docs"
+          # /metrics if exposed
+          curl -fsS --max-time 5 -o /dev/null -w "HTTP %{http_code}\n" "${BASE_URL}/metrics" || true
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ needs.resolve.outputs.environment }}
+          path: /tmp/health.json
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 3. Deploy — drives the in-repo deploy.sh script on a runner with
+  #    access to the target cluster (via SSH or via the runner's own
+  #    docker context, depending on how production is wired).
+  # ---------------------------------------------------------------------------
+  deploy-dev:
+    name: Deploy → development
+    needs: [resolve, smoke]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: development
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Run migrations (best-effort)
+        env:
+          DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
+          SECRET_KEY:   ${{ secrets.SECRET_KEY }}
+        run: |
+          python -c "from app.database import Base, engine; Base.metadata.create_all(bind=engine)"
+
+      - name: Run deploy script
+        env:
+          IMAGE:       ${{ needs.resolve.outputs.image }}
+          DEPLOY_ENV:  development
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [[ -n "${DEPLOY_HOST}" ]]; then
+            mkdir -p ~/.ssh
+            echo "${DEPLOY_SSH_KEY}" > ~/.ssh/id_ed25519
+            chmod 600 ~/.ssh/id_ed25519
+            ssh -o StrictHostKeyChecking=accept-new \
+                "${DEPLOY_HOST}" \
+                "IMAGE=${IMAGE} DEPLOY_ENV=development bash -s" < scripts/deploy.sh
+          else
+            # Local docker context — same machine runs the stack.
+            IMAGE="${IMAGE}" DEPLOY_ENV=development bash scripts/deploy.sh --no-blue-green "${IMAGE}"
+          fi
+
+  deploy-staging:
+    name: Deploy → staging
+    needs: [resolve, smoke]
+    if: github.event_name == 'workflow_dispatch' && inputs.environment == 'staging'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run load test (light)
+        env:
+          STAGING_URL: ${{ secrets.STAGING_URL }}
+        run: |
+          if [[ -n "${STAGING_URL}" ]]; then
+            pip install locust
+            cat > /tmp/locustfile.py <<'PY'
+            from locust import HttpUser, task
+            class HealthUser(HttpUser):
+                @task
+                def health(self):
+                    self.client.get("/health")
+            PY
+            locust -f /tmp/locustfile.py \
+                    --host="${STAGING_URL}" \
+                    --users 20 --spawn-rate 5 \
+                    --run-time 30s --headless \
+                    --only-summary
+          fi
+        continue-on-error: true
+
+      - name: Deploy
+        env:
+          IMAGE:       ${{ needs.resolve.outputs.image }}
+          DEPLOY_ENV:  staging
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST_STAGING }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY_STAGING }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${DEPLOY_SSH_KEY}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh -o StrictHostKeyChecking=accept-new \
+              "${DEPLOY_HOST}" \
+              "IMAGE=${IMAGE} DEPLOY_ENV=staging bash -s" < scripts/deploy.sh
+
+  deploy-production:
+    name: Deploy → production
+    needs: [resolve, smoke]
+    if: github.event_name == 'workflow_dispatch' && inputs.environment == 'production'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      # 'production' environment is configured in repo settings with required
+      # reviewers — they must approve before this job runs.
+    steps:
+      - name: Confirm target tag
+        env:
+          TAG: ${{ inputs.image_tag }}
+        run: |
+          if [[ -z "${TAG}" ]]; then
+            echo "Production deploys MUST pin an explicit image tag (no SHA shortcuts)."
+            exit 1
+          fi
+
+      - name: Backup database before deploy
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          BACKUP_S3_BUCKET: ${{ secrets.BACKUP_S3_BUCKET }}
+          BACKUP_S3_PREFIX: lab-manager/pre-deploy
+        run: |
+          pip install boto3
+          DATABASE_URL="${DATABASE_URL}" \
+          BACKUP_BACKEND=s3 \
+          BACKUP_S3_BUCKET="${BACKUP_S3_BUCKET}" \
+          BACKUP_S3_PREFIX="${BACKUP_S3_PREFIX}" \
+          BACKUP_KEEP=30 \
+          python scripts/backup.py
+
+      - name: Deploy (blue-green)
+        env:
+          IMAGE:       ${{ needs.resolve.outputs.image }}
+          DEPLOY_ENV:  production
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST_PROD }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY_PROD }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${DEPLOY_SSH_KEY}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh -o StrictHostKeyChecking=accept-new \
+              "${DEPLOY_HOST}" \
+              "IMAGE=${IMAGE} DEPLOY_ENV=production bash -s" < scripts/deploy.sh
+
+      - name: Smoke check after switch
+        env:
+          URL: https://app.lab-manager.example.com
+        run: |
+          for i in {1..30}; do
+            if curl -fsS --max-time 5 "${URL}/health" >/dev/null 2>&1; then
+              echo "Production is healthy"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Post-deploy health check failed"
+          exit 1
+
+      - name: Notify on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v2
+        with:
+          payload: |
+            {
+              "text": ":rotating_light: lab-manager production deploy FAILED (${{ github.workflow }} #${{ github.run_number }}) — ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        continue-on-error: true
+
+      - name: Notify on success
+        if: success()
+        uses: slackapi/slack-github-action@v2
+        with:
+          payload: |
+            {
+              "text": ":rocket: lab-manager production deploy succeeded (${{ github.workflow }} #${{ github.run_number }}) — image: ${{ needs.resolve.outputs.image }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        continue-on-error: true

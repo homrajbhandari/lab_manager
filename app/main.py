@@ -1,9 +1,12 @@
 import csv
 import io
+import logging
 import mimetypes
 import os
 import re
 import shutil
+import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -11,6 +14,8 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, Query, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from openpyxl import Workbook, load_workbook
@@ -20,6 +25,17 @@ from sqlalchemy.orm import Session
 from app import auth, crud, models, schemas
 from app.database import Base, engine, get_db
 from app.dependencies import PaginationParams
+from app.logging_config import (
+    configure_logging,
+    request_id_var,
+    trace_id_var,
+)
+from app.metrics import (
+    MetricsMiddleware,
+    is_enabled as metrics_enabled,
+    metrics_endpoint,
+    setup_metrics,
+)
 from app.migrations import (
     run_inventory_barcode_migration,
     run_task_assignee_migration,
@@ -43,11 +59,77 @@ run_user_auth_columns_migration(engine)
 run_inventory_barcode_migration(engine)
 
 
+# Configure structured logging before anything that might log.
+configure_logging()
+logger = logging.getLogger("app.main")
+
+
 app = FastAPI(
     title="Research Laboratory Management System",
     description="API for managing research laboratory resources.",
     version="1.0.0"
 )
+
+
+# --- CORS ----------------------------------------------------------------
+_cors_origins_raw = os.getenv("CORS_ORIGINS", "*")
+_cors_origins = (
+    ["*"] if _cors_origins_raw.strip() == "*"
+    else [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=os.getenv("CORS_ALLOW_CREDENTIALS", "false").lower() in {"1", "true", "yes"},
+    allow_methods=os.getenv("CORS_ALLOW_METHODS", "GET,POST,PUT,PATCH,DELETE,OPTIONS").split(","),
+    allow_headers=os.getenv("CORS_ALLOW_HEADERS", "Authorization,Content-Type,Accept,X-Request-ID").split(","),
+    expose_headers=["X-Request-ID"],
+)
+
+# --- Trusted hosts (only enforced in production) -------------------------
+if os.getenv("APP_ENV", "development").lower() == "production":
+    _allowed_hosts = [
+        h.strip() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()
+    ]
+    if _allowed_hosts:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
+
+# --- Metrics -------------------------------------------------------------
+if metrics_enabled():
+    setup_metrics()
+    app.add_middleware(MetricsMiddleware)
+
+
+# --- Security headers ----------------------------------------------------
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Inject per-request id propagation and a small set of defensive
+    response headers. Cheap to run on every request.
+    """
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    trace_id   = request.headers.get("x-trace-id")   or request_id
+    rid_token  = request_id_var.set(request_id)
+    tid_token  = trace_id_var.set(trace_id)
+    started    = time.perf_counter()
+    try:
+        response = await call_next(request)
+    finally:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        request_id_var.reset(rid_token)
+        trace_id_var.reset(tid_token)
+        logger.info(
+            "%s %s -> %s in %dms",
+            request.method, request.url.path, "-", elapsed_ms,
+            extra={"event": "request", "duration_ms": elapsed_ms},
+        )
+    response.headers.setdefault("X-Request-ID", request_id)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+    )
+    return response
 
 
 _UPLOAD_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -440,11 +522,42 @@ def root():
 
 
 @app.get("/health")
-def health_check():
+def health_check(db: Session = Depends(get_db)):
+    """Liveness + readiness probe.
+
+    Returns ``status="healthy"`` only when the database engine is reachable.
+    A failing DB is reported as ``status="degraded"`` so an external
+    orchestrator can decide whether to mark the instance unhealthy.
+    """
+    db_ok = True
+    db_detail: Optional[str] = None
+    try:
+        from sqlalchemy import text
+        db.execute(text("SELECT 1"))
+    except Exception as exc:  # noqa: BLE001 - report any failure
+        db_ok = False
+        db_detail = str(exc)
+        logger.warning("healthcheck: database ping failed: %s", exc)
+
     return success_response(
-        data={"status": "healthy"},
-        message="Service is healthy",
+        data={
+            "status":      "healthy" if db_ok else "degraded",
+            "db":          "ok" if db_ok else "error",
+            "db_detail":   db_detail,
+            "version":     app.version,
+            "environment": os.getenv("APP_ENV", "development"),
+        },
+        message="Service is healthy" if db_ok else "Service is degraded",
     )
+
+
+# /metrics is only mounted when Prometheus scraping is enabled, so
+# unauthenticated callers (which only exist inside the cluster) can pull
+# the exposition format without authenticating.
+if metrics_enabled():
+    @app.get(os.getenv("METRICS_PATH", "/metrics"), include_in_schema=False)
+    async def _prometheus_metrics():  # noqa: WPS430 - nested by design
+        return await metrics_endpoint()
 
 
 @app.get(

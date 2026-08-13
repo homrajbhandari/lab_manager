@@ -1,0 +1,102 @@
+# Local-development overrides. Loaded automatically by `docker compose up`
+# when this file is present alongside docker-compose.yml.
+#
+# It is safe to commit this file. It must NEVER contain production secrets.
+
+services:
+  app:
+    build:
+      target: production
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    image: lab-manager:dev
+    container_name: lab-manager-app-dev
+    restart: unless-stopped
+    # Run a single uvicorn process with --reload so source changes
+    # mounted from the host are picked up without rebuilding the image.
+    command:
+      - "uvicorn"
+      - "app.main:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--reload"
+      - "--reload-dir"
+      - "/app/app"
+      - "--log-level"
+      - "debug"
+    environment:
+      APP_ENV: development
+      DEBUG: "true"
+      LOG_LEVEL: DEBUG
+      LOG_FORMAT: text
+      # Allow the Vite/React dev server and curl/Postman.
+      CORS_ORIGINS: "*"
+      CORS_ALLOW_CREDENTIALS: "true"
+      # Connect to a dev database seeded with fixtures.
+      DATABASE_URL: postgresql+psycopg2://lab:lab@db:5432/lab_manager_dev
+      ADMIN_USERNAME: admin
+      ADMIN_EMAIL: admin@example.com
+      ADMIN_PASSWORD: admin
+      SECRET_KEY: dev-insecure-secret-change-me
+      ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 60
+      REDIS_URL: redis://redis:6379/0
+      RATE_LIMIT_PER_MINUTE: "10000"
+      UPLOAD_ROOT: /app/uploads
+    volumes:
+      # Mount the local source tree so edits on the host are reflected
+      # immediately in the container (uvicorn --reload picks them up).
+      - ./app:/app/app:ro
+      - ./scripts:/app/scripts:ro
+      - ./tests:/app/tests:ro
+      - ./alembic.ini:/app/alembic.ini:ro
+      - dev_uploads:/app/uploads
+      - dev_logs:/app/logs
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck.py"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  db:
+    # Dev DB seeded with sample data — see scripts/initdb/01-seed.sql.
+    container_name: lab-manager-db-dev
+    environment:
+      POSTGRES_USER: lab
+      POSTGRES_PASSWORD: lab
+      POSTGRES_DB: lab_manager_dev
+    volumes:
+      - db_dev_data:/var/lib/postgresql/data
+      - ./scripts/initdb:/docker-entrypoint-initdb.d:ro
+
+  redis:
+    container_name: lab-manager-redis-dev
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    volumes:
+      - redis_dev_data:/data
+
+  nginx:
+    # In dev, hit the app directly on 8000 — nginx is started manually
+    # (`docker compose --profile proxy up nginx`) when needed.
+    profiles: ["proxy"]
+    ports: []
+
+volumes:
+  db_dev_data:
+    name: lab_manager_db_dev
+  redis_dev_data:
+    name: lab_manager_redis_dev
+  dev_uploads:
+    name: lab_manager_uploads_dev
+  dev_logs:
+    name: lab_manager_logs_dev

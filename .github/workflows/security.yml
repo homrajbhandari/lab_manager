@@ -1,0 +1,174 @@
+name: security
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Weekly scan (Mondays 06:00 UTC). External schedule scanning is
+    # useful to catch newly-published CVEs.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Python static security analysis (Bandit).
+  # ---------------------------------------------------------------------------
+  bandit:
+    name: Bandit (Python security)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Bandit
+        run: pip install --upgrade pip "bandit[toml]==1.7.10"
+
+      - name: Run Bandit
+        run: |
+          bandit -r app \
+            --severity-level medium \
+            --confidence-level medium \
+            -f json -o bandit-report.json || true
+          bandit -r app \
+            --severity-level medium \
+            --confidence-level medium \
+            -f txt
+
+      - name: Upload Bandit SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: bandit-report.json
+          category: bandit
+        continue-on-error: true
+
+  # ---------------------------------------------------------------------------
+  # 2. Filesystem vulnerability scan (Trivy).
+  # ---------------------------------------------------------------------------
+  trivy-fs:
+    name: Trivy filesystem
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: "sarif"
+          output: "trivy-fs.sarif"
+          severity: "CRITICAL,HIGH,MEDIUM"
+          ignore-unfixed: true
+
+      - name: Upload Trivy results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+  # ---------------------------------------------------------------------------
+  # 3. Secrets in source (Gitleaks).
+  # ---------------------------------------------------------------------------
+  gitleaks:
+    name: Gitleaks (secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE is only required for org-level runs.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  # ---------------------------------------------------------------------------
+  # 4. Dependency vulnerability scan (pip-audit + OWASP dependency-check).
+  # ---------------------------------------------------------------------------
+  pip-audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install pip-audit
+        run: pip install --upgrade pip "pip-audit==2.7.3"
+
+      - name: Audit requirements
+        if: hashFiles('requirements.txt') != ''
+        run: |
+          pip-audit \
+            --requirement requirements.txt \
+            --format json \
+            --output pip-audit.json \
+            --vulnerability-service osv \
+            --strict
+        continue-on-error: true
+
+      - name: Upload pip-audit artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit
+          path: pip-audit.json
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 5. OWASP dependency-check (broader than pip-audit, also covers
+  #    transitive native deps). Optional — runs only on push to main.
+  # ---------------------------------------------------------------------------
+  owasp:
+    name: OWASP dependency-check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run OWASP dependency-check
+        uses: dependency-check/Dependency-Check_GitHub-Action@main
+        with:
+          project: lab-manager
+          path: .
+          format: SARIF
+          args: >
+            --enableRetired
+            --enableExperimental
+            --failOnCVSS 8
+
+      - name: Upload OWASP results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: reports/dependency-check-report.sarif
+          category: owasp-dep-check
+        continue-on-error: true

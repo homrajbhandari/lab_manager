@@ -1,0 +1,181 @@
+name: lab-manager
+
+# Production-shape compose file. For local development use:
+#   docker compose -f docker-compose.yml -f docker-compose.override.yml up
+# The override file is loaded automatically by `docker compose` if present,
+# so the local dev workflow is just `docker compose up`.
+
+x-app-env: &app-env
+  # Database
+  DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-lab}:${POSTGRES_PASSWORD:-lab}@db:5432/${POSTGRES_DB:-lab_manager}
+  # JWT
+  SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set}
+  ALGORITHM: ${ALGORITHM:-HS256}
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+  # App
+  APP_ENV: ${APP_ENV:-production}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+  # CORS
+  CORS_ORIGINS: ${CORS_ORIGINS:-*}
+  CORS_ALLOW_CREDENTIALS: ${CORS_ALLOW_CREDENTIALS:-false}
+  # Redis
+  REDIS_URL: redis://redis:6379/0
+  # Rate limiting
+  RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PERMINUTE:-120}
+  # Uploads
+  UPLOAD_ROOT: /app/uploads
+  # Bootstrap admin
+  ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+  ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set}
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${IMAGE_NAME:-lab-manager}:${IMAGE_TAG:-latest}
+    container_name: lab-manager-app
+    restart: unless-stopped
+    env_file:
+      - path: .env.production
+        required: false
+    environment:
+      <<: *app-env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      # Internal port only — nginx fronts the app.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - app_uploads:/app/uploads
+      - app_logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1024M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  db:
+    image: postgres:15-alpine
+    container_name: lab-manager-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lab}
+      POSTGRES_DB: ${POSTGRES_DB:-lab_manager}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./scripts/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lab} -d ${POSTGRES_DB:-lab_manager}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1024M
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: redis:7-alpine
+    container_name: lab-manager-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 384M
+    security_opt:
+      - no-new-privileges:true
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: lab-manager-nginx
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx_logs:/var/log/nginx
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - backend
+      - frontend
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  backend:
+    driver: bridge
+    internal: false
+  frontend:
+    driver: bridge
+
+volumes:
+  db_data:
+    name: lab_manager_db_data
+  redis_data:
+    name: lab_manager_redis_data
+  app_uploads:
+    name: lab_manager_uploads
+  app_logs:
+    name: lab_manager_logs
+  nginx_logs:
+    name: lab_manager_nginx_logs

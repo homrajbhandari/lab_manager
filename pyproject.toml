@@ -1,0 +1,89 @@
+[project]
+name = "lab-manager"
+version = "1.0.0"
+description = "FastAPI backend for the Research Laboratory Management System."
+readme = "readme.md"
+requires-python = ">=3.11"
+authors = [{ name = "lab-manager maintainers" }]
+license = { text = "MIT" }
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+extend-exclude = '''
+/(
+    \.git
+ | \.venv
+ | venv
+ | build
+ | dist
+ | migrations
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+known_first_party = ["app"]
+known_third_party = ["fastapi", "pydantic", "sqlalchemy", "uvicorn", "starlette"]
+skip_glob = ["**/migrations/*"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+no_strict_optional = true
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = false
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--showlocals",
+    "--tb=short",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:passlib.*",
+    "ignore::DeprecationWarning:jose.*",
+    "ignore::PendingDeprecationWarning",
+]
+markers = [
+    "slow: marks tests as slow (deselect with -m 'not slow')",
+    "integration: marks tests as integration tests",
+]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/migrations/*",
+    "*/scripts/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "\\.\\.\\.",
+]
+
+[tool.bandit]
+exclude_dirs = ["tests", "scripts", "migrations"]
+skips = ["B101"]  # assert is fine in tests; flagged only in app code.

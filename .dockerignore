@@ -1,0 +1,106 @@
+# --- Python / build artifacts ---------------------------------------------
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+build/
+dist/
+.eggs/
+pip-wheel-metadata/
+
+# --- Virtual environments ---------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# --- Test / coverage output -------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.cache/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+.pyre/
+
+# --- Git --------------------------------------------------------------------
+.git/
+.gitignore
+.gitattributes
+.gitkeep
+
+# --- Environment & secrets ---------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.test
+!.env.production
+*.pem
+*.key
+*.crt
+secrets/
+
+# --- Logs / runtime data ----------------------------------------------------
+*.log
+logs/
+*.db
+*.sqlite
+*.sqlite3
+*.pid
+
+# --- IDE / editor -----------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.project
+.classpath
+.settings/
+
+# --- Documentation / scripts that are not needed in the image ---------------
+docs/
+*.md
+!README.md
+LICENSE
+.editorconfig
+
+# --- CI / deployment files that should not leak into the image --------------
+.github/
+.gitlab-ci.yml
+.circleci/
+Dockerfile
+docker-compose*.yml
+.dockerignore
+nginx/
+
+# --- Test files (kept out of the production image) -------------------------
+tests/
+test_*.py
+*_test.py
+conftest.py
+pytest.ini
+pyproject.toml
+.flake8
+.isort.cfg
+.black
+
+# --- Local artifacts that do not belong in the image -----------------------
+uploads/
+tmp/
+temp/
+node_modules/
+dist/
+coverage/
