@@ -37,3 +37,6 @@ Thumbs.db
 .env
 .env.local
 uploads/
+
+lab-manager-report.docx
+running_method.readme
